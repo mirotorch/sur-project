@@ -1,0 +1,134 @@
+Zadání projektu do SUR 2025/2026
+================================
+
+Bodové ohodnocení:   25 bodù
+
+Úkolem je natrénovat detektor jedné osoby z obrázku oblièeje a hlasové
+nahrávky. Trénovací vzory jsou k dispozici v archívu na adrese:
+
+https://www.fit.vutbr.cz/study/courses/SUR/public/projekt_2025-2026/SUR_projekt2025-2026.zip
+
+Tento archív obsahuje adresáøe:
+
+target_train
+target_dev
+
+kde jsou trénovací vzory pro detekovanou osobu ve formátu PNG a WAV,
+
+v adresáøích:
+
+non_target_train
+non_target_dev
+
+jsou potom negativní pøíklady. Pro trénování detektorù je dovoleno pou¾ít
+pouze tato poskytnutá data. NENÍ POVOLENO jakékoli vyu¾ití jiných externích
+øeèových èi obrázkových dat, jako¾to i pou¾ití ji¾ pøedtrénovaných modelù
+(napø. pro extrakci reprezentací (embeddings) oblièejù nebo hlasu). Tato
+data ale mù¾ete "augmentovat" tak, ¾e vytvoøíte nové trénovací vzory napø.
+pøidáním ¹umu do nahrávek èi obrázkù, rotací, posunutím èi zmìnou velikosti
+obrázkù, zmìnou rychlosti øeèi apod.
+
+Dùle¾itým cílem projektu je schopnost systému generalizovat na neznámá
+data i pøi pou¾ití velmi omezeného mno¾ství poskytnutých trrénovacích dat.
+Evaluaèní data, která budou zveøejnìna pozdìji (viz ní¾e), budou obsahovat
+vzory s odli¹nými vlastnostmi (napø. ¹um, zmìny kvality obrazu apod.),
+které se nemusí pøesnì vyskytovat v trénovacích datech. Pøi návrhu systému
+proto zva¾te:
+ - vhodné techniky augmentace dat,
+ - volbu modelu s ohledem na omezené mno¾ství dat,
+ - omezení pøetrénování (overfittingu).
+
+Tyto aspekty musí být jasnì popsány v dokumentaci (viz ní¾e).
+
+Na pøedná¹ce pøi zadávání projektu si pøedvedeme jednoduché baseline systémy
+(MFCC + GMM pro audio, lineární klasifikátor pro obrázky). Pro dosa¾ení
+plného bodového hodnocení nestaèí tyto systémy pouze reprodukovat nebo mírnì
+upravit. Oèekává se vlastní pøístup reflektující vý¹e uvedené po¾adavky.
+
+Do adresáøù *_train a *_dev byla trénovací data rozdìlena pøedev¹ím pro
+úèely trénování a testování ji¾ zmínìných "baseline" systémù. Z dùvodu
+omezeného rozsahu poskytnutých dat ov¹em takové rozdìlení nebude optimální
+a pro dosa¾ení plného bodového hodnocení bude nutné pou¾ít vhodnou validaèní
+strategii (napø. køí¾ovou validaci umo¾òující efektivnì trénovat i testovat
+na v¹ech datech). Pro tento úèel mù¾e být u¾iteèné respektovat informace
+o tom, které trénovací vzory patøí stejné osobì a zda byly poøízeny v rámci
+jednoho nahrávacího sezení. Jméno souboru pro ka¾dý vzor je rozdìleno do
+polí pomocí podtr¾ítek (napø. f401_01_f21_i0_0.png), kde první pole (f401)
+oznaèuje identitu osoby a druhé pole oznaèuje èíslo nahrávacího sezení (01).
+Pro trénování doporuèujeme pou¾ít køí¾ovou validaci respektující strukturu
+dat (napø. podle nahrávacích sezení, tj. aby vzory z jednoho sezení nebyly
+souèasnì v trénovacích i validaèních datech). Zvolený zpùsob evaluace bìhem
+vývoje musí být popsán a zdùvodnìn v dokumentaci.
+
+Ostrá evaluaèní data, na kterých budou va¹e systémy vyhodnoceny, budou
+k dispozici v nedìli 3. kvìtna ráno. Tato data budou obsahovat øádovì
+stovky souborù ke zpracování. Va¹ím úkolem bude tato data automaticky
+zpracovat va¹imi systémy (vìøíme Vám, ¾e nebudete podvádìt a dívat se na
+obrázky èi poslouchat nahrávky) a nahrát soubory s výsledky do informaèního
+systému (IS). Soubor s výsledky bude ASCII se tøemi poli na øádku oddìlenými
+mezerou. Tato pole budou obsahovat popoøadì následující údaje:
+ - jméno segmentu (jméno souboru bez pøípony .wav èi .png)
+ - èíselné skóre, o kterém bude platit, ¾e èím vìt¹í má hodnotu, tím si je
+   systém jistìj¹í, ¾e se jedná o hledanou osobu
+ - tvrdé rozhodnutí: èíslo 1 pro hledanou osobu, jinak 0. Toto rozhodnutí
+   proveïte pro pøedpoklad, ¾e apriorní pravdìpodobnost výskytu hledané
+   osoby v ka¾dém testovaném vzoru je 0,5
+
+V jakém programovacím jazyce budete implementovat vá¹ detektor èi pomocí
+jakých nástrojù budete data zpracovávat, zále¾í jen na Vás. Ka¾dá skupina
+musí odevzdat alespoò:
+ - jeden systém zalo¾ený pouze na obrazových datech,
+ - jeden systém zalo¾ený pouze na audio datech,
+ - jeden systém kombinující obì modality (multimodální fúze).
+
+Zvolený zpùsob kombinace modalit (napø. na úrovni pøíznakù nebo skóre) musí
+být popsán a zdùvodnìn v dokumentaci. Odevzdat mù¾ete i více souborù
+s výsledky, maximálnì v¹ak námi bude zpracováno 6 takových souborù. Soubory
+s výsledky mù¾ete do pondìlí 4. kvìtna 23:59 nahrávat do IS. Klíè se
+správnými odpovìïmi bude zveøejnìn 5. kvìtna. Na poslední pøedná¹ce
+6. kvìtna 2026 bychom mìli analyzovat Va¹e výsledky a øe¹ení.
+
+Na tomto projektu budete pracovat ve skupinách (1 a¾ 2 lidé), do kterých se
+mù¾ete pøihlásit v IS. Jména souborù s výsledky pro jednotlivé systémy volte
+tak, aby se podle nich dalo poznat, o jaký systém se jedná (napø. audio_GMM,
+image_linear). Ka¾dá skupina nahraje v¹echny soubory s výsledky zabalené do
+jednoho ZIP archívu se jménem login1_login2.zip èi login1.zip, podle toho,
+kolik Vás bude ve skupinì. Kromì souborù s výsledky bude archív obsahovat
+také adresáø SRC/, do kterého ulo¾íte soubory se zdrojovými kódy
+implementovaných systémù.
+
+Dále bude archív obsahovat soubor dokumentace.pdf, který bude v èeském,
+slovenském nebo anglickém jazyce popisovat Va¹e øe¹ení. Dokumentace
+(cca 3 strany A4) musí obsahovat:
+ - popis navr¾ených systémù (audio, obraz, multimodální),
+ - popis pou¾ité validaèní strategie,
+ - zpùsob øe¹ení generalizace a omezení pøetrénování.
+
+Dokumentace musí umo¾nit pochopit, proè byl systém navr¾en právì tímto
+zpùsobem, nikoli pouze jak je implementován. Dùraz vìnujte úvahám vedoucím
+k finálnímu návrhu systému: jak jste systémy bìhem jejich vývoje
+vyhodnocovali a které techniky èi rozhodnutí se pozitivnì projevily
+na úspì¹nosti systému. Tento dokument bude také popisovat, jak získat Va¹e
+výsledky pomocí pøilo¾eného kódu. Uveïte, jak kódy zkompilovat, jak systémy
+spustit, kde hledat výsledné soubory a jaké externí nástroje je nutné
+instalovat a pou¾ít.
+
+Do ZIP archívu prosím nepøikládejte evaluaèní data!
+
+Souèástí hodnocení bude krátká ústní obhajoba po odevzdání projektu, která
+probìhne v prvních týdnech zkou¹kového období (èasové sloty budou
+upøesnìny). Studenti by mìli být schopni vysvìtlit návrh svého øe¹ení
+a odpovìdìt na dotazy k pou¾itým metodám.
+
+Hodnocení:
+Plný poèet bodù (25) získá øe¹ení, které:
+ - správnì naèítá data a produkuje výsledky,
+ - obsahuje funkèní systémy pro obraz, audio i jejich kombinaci,
+ - pou¾ívá vhodnou validaèní strategii,
+ - reflektuje problém generalizace a omezeného mno¾ství dat,
+ - obsahuje kvalitní dokumentaci umo¾òující reprodukci a pochopení,
+ - je úspì¹nì prezentováno u ústní obhajoby.
+
+V pøípadì nesplnìní nìkterých po¾adavkù bude bodové hodnocení sní¾eno.
+
+Poslední modifikace: 7. dubna 2026, Luká¹ Burget
