@@ -241,7 +241,9 @@ class CNNTrainer:
         return np.array(all_scores)
 
 
-def cross_validate_cnn(features, labels, filenames, n_splits=2, epochs=50):
+def cross_validate_cnn(
+    features, labels, filenames, cv_strategy="kfold", n_splits=2, epochs=50
+):
     """
     Perform session-based cross-validation with CNN.
 
@@ -249,19 +251,41 @@ def cross_validate_cnn(features, labels, filenames, n_splits=2, epochs=50):
         features: MFCC features array
         labels: Labels array
         filenames: List of filenames
-        n_splits: Number of CV folds
+        cv_strategy: Cross-validation strategy to use
+            - "kfold": Session-Aware K-Fold (default, faster)
+            - "loso": Leave-One-Session-Out (more comprehensive)
+        n_splits: Number of folds (only used for kfold strategy)
         epochs: Training epochs per fold
 
     Returns:
-        list of CV results
+        list of CV results (dict with fold info, metrics, and predictions)
+
+    Examples:
+        # Session-Aware K-Fold with 3 folds
+        results = cross_validate_cnn(features, labels, filenames,
+                                     cv_strategy="kfold", n_splits=3)
+
+        # Leave-One-Session-Out (exhaustive)
+        results = cross_validate_cnn(features, labels, filenames,
+                                     cv_strategy="loso")
     """
-    cv_splits = session_based_cv(filenames, labels, n_splits)
+    # Select CV strategy
+    if cv_strategy.lower() == "kfold":
+        cv_splits = k_fold(filenames, labels, n_splits)
+    elif cv_strategy.lower() == "loso":
+        cv_splits = loso(filenames, labels)
+    else:
+        raise ValueError(f"Unknown CV strategy: {cv_strategy}. Use 'kfold' or 'loso'")
+
     results = []
 
-    print(f"\n=== CNN Cross-Validation ({len(cv_splits)} folds) ===")
+    print(
+        f"\n=== CNN Cross-Validation ({cv_strategy.upper()}, "
+        f"{len(cv_splits)} folds) ==="
+    )
 
     for fold, (train_idx, val_idx) in enumerate(cv_splits):
-        print(f"\nFold {fold + 1}:")
+        print(f"\nFold {fold + 1}/{len(cv_splits)}:")
         print(f"  Train: {len(train_idx)} samples, Val: {len(val_idx)} samples")
 
         X_train, X_val = features[train_idx], features[val_idx]
@@ -292,7 +316,6 @@ def cross_validate_cnn(features, labels, filenames, n_splits=2, epochs=50):
         history = trainer.train(train_loader, val_loader, epochs=epochs)
 
         val_loss, val_auc = trainer.evaluate(val_loader)
-
         scores = trainer.predict(val_loader)
 
         results.append(
@@ -302,6 +325,8 @@ def cross_validate_cnn(features, labels, filenames, n_splits=2, epochs=50):
                 "val_loss": val_loss,
                 "scores": scores,
                 "model": model,
+                "train_idx": train_idx,
+                "val_idx": val_idx,
             }
         )
 
@@ -498,13 +523,15 @@ def predict_on_eval(model, trainer, optimal_threshold, base_dir=None):
     }
 
 
-def main(mode="train"):
+def main(mode="train", cv_strategy="kfold", n_splits=2):
     """
     Main training pipeline.
 
     Args:
         mode: One of "train" (cross-validation), "dev" (train on all dev data),
              or "eval" (train on dev and predict on eval)
+        cv_strategy: Cross-validation strategy ("kfold" or "loso")
+        n_splits: Number of folds for kfold strategy
     """
     base_dir = str(PROJECT_ROOT / "dataset")
 
@@ -519,7 +546,12 @@ def main(mode="train"):
 
     if mode == "train":
         cnn_results = cross_validate_cnn(
-            features, labels, filenames, n_splits=2, epochs=10
+            features,
+            labels,
+            filenames,
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
+            epochs=10,
         )
 
     elif mode == "dev":
@@ -556,6 +588,19 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--cv-strategy",
+        type=str,
+        choices=["kfold", "loso"],
+        default="kfold",
+        help="Cross-validation strategy to use (default: kfold)",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=2,
+        help="Number of folds for kfold strategy (default: 2)",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         choices=["train", "dev", "eval"],
@@ -564,4 +609,4 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    main(mode=args.mode)
+    main(mode=args.mode, cv_strategy=args.cv_strategy, n_splits=args.n_splits)
