@@ -17,13 +17,10 @@ from sklearn.svm import LinearSVC
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from session_cv import k_fold, loso
-from utils import (compute_eer_threshold, load_dataset, load_images,
-                   save_predictions)
+from utils import compute_eer_threshold, load_dataset, load_images, save_predictions
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
-
-C_PARAM = 0.001
 
 
 def ensure_cache_dir():
@@ -35,6 +32,36 @@ def get_cache_path(method, params_str, dataset_hash):
     """Generate cache file path for features."""
     filename = f"{method}_{params_str}_{dataset_hash}.npy"
     return os.path.join(CACHE_DIR, filename)
+
+
+def get_threshold_cache_path(method, cv_strategy, n_splits, n_components):
+    """Generate cache file path for CV mean threshold."""
+    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
+    filename = f"threshold_{method}_{cv_strategy}_{n_splits}_{n_comp_str}.npy"
+    return os.path.join(CACHE_DIR, filename)
+
+
+def save_cv_threshold(threshold, method, cv_strategy, n_splits, n_components):
+    """Save mean CV threshold to cache."""
+    ensure_cache_dir()
+    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
+    np.save(cache_path, np.array([threshold]))
+    print(f"  Saved CV mean threshold to {cache_path}")
+
+
+def load_cv_threshold(method, cv_strategy, n_splits, n_components):
+    """
+    Load mean CV threshold from cache.
+
+    Returns:
+        Threshold value or None if not found
+    """
+    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
+    if os.path.exists(cache_path):
+        threshold = np.load(cache_path)[0]
+        print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
+        return threshold
+    return None
 
 
 def compute_dataset_hash(images):
@@ -116,7 +143,6 @@ def extract_combined_features_cached(
             "normalize": True,
         }
 
-    # Extract individual features
     hog_features = extract_features_cached(
         images, method="hog", use_cache=use_cache, **hog_kwargs
     )
@@ -124,14 +150,13 @@ def extract_combined_features_cached(
         images, method="lbp", use_cache=use_cache, **lbp_kwargs
     )
 
-    # Concatenate features
     combined = np.concatenate([hog_features, lbp_features], axis=1)
     print(f"  Combined features shape: {combined.shape}")
 
     return combined
 
 
-def train_svm(X_train, y_train, C=C_PARAM):
+def train_svm(X_train, y_train, C=1.0):
     """
     Train SVM classifier.
 
@@ -158,7 +183,7 @@ def evaluate_svm(svm, X_test, y_test):
         y_test: Test labels
 
     Returns:
-        dict with accuracy, auc, and scores
+        dict with accuracy, auc, scores, and calibrated scores
     """
     scores = svm.decision_function(X_test)
 
@@ -193,7 +218,7 @@ def cross_validate(
     method="hog",
     cv_strategy="kfold",
     n_splits=2,
-    C=C_PARAM,
+    C=1.0,
     n_components=None,
     use_cache=True,
     hog_kwargs=None,
@@ -218,7 +243,7 @@ def cross_validate(
         **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
-        List of CV results
+        List of CV results with mean threshold saved to cache
     """
     if method == "combined":
         features = extract_combined_features_cached(
@@ -235,6 +260,7 @@ def cross_validate(
         raise ValueError(f"Unknown CV strategy: {cv_strategy}. Use 'kfold' or 'loso'")
 
     results = []
+    fold_thresholds = []
 
     print(
         f"\n=== {method.upper()} Cross-Validation ({cv_strategy.upper()}, "
@@ -251,7 +277,7 @@ def cross_validate(
         y_train, y_val = labels[train_idx], labels[val_idx]
 
         if len(np.unique(y_train)) < 2 or len(np.unique(y_val)) < 2:
-            print(f"  Skipping fold - only one class present")
+            print("  Skipping fold - only one class present")
             continue
 
         scaler = StandardScaler()
@@ -273,8 +299,15 @@ def cross_validate(
         svm = train_svm(X_train_transformed, y_train, C)
         result = evaluate_svm(svm, X_val_transformed, y_val)
 
+        # Compute EER threshold for this fold
+        fold_threshold, fold_eer = compute_eer_threshold(
+            y_val, result["calibrated_scores"]
+        )
+        fold_thresholds.append(fold_threshold)
+
         print(f"  Accuracy: {result['accuracy']:.4f}")
         print(f"  AUC: {result['auc']:.4f}")
+        print(f"  Fold EER: {fold_eer:.4f}, Threshold: {fold_threshold:.4f}")
 
         results.append(
             {
@@ -283,6 +316,8 @@ def cross_validate(
                 "val_size": len(val_idx),
                 "accuracy": result["accuracy"],
                 "auc": result["auc"],
+                "threshold": fold_threshold,
+                "eer": fold_eer,
                 "svm": svm,
                 "scaler": scaler,
                 "pca": pca,
@@ -298,6 +333,11 @@ def cross_validate(
     print(f"Mean Accuracy: {np.mean(accuracies):.4f} (+/- {np.std(accuracies):.4f})")
     print(f"Mean AUC: {np.mean(aucs):.4f} (+/- {np.std(aucs):.4f})")
 
+    if fold_thresholds:
+        mean_threshold = np.mean(fold_thresholds)
+        print(f"\nMean CV Threshold: {mean_threshold:.4f}")
+        save_cv_threshold(mean_threshold, method, cv_strategy, n_splits, n_components)
+
     return results
 
 
@@ -305,7 +345,7 @@ def train_final_model(
     images,
     labels,
     method="hog",
-    C=C_PARAM,
+    C=1.0,
     n_components=None,
     use_cache=True,
     hog_kwargs=None,
@@ -366,10 +406,13 @@ def predict_on_dev(
     use_cache=True,
     hog_kwargs=None,
     lbp_kwargs=None,
+    cv_strategy="kfold",
+    n_splits=2,
+    n_components=None,
     **feature_kwargs,
 ):
     """
-    Generate predictions on dev set, compute EER threshold, and save results.
+    Generate predictions on dev set using mean CV threshold and save results.
 
     Args:
         svm, scaler: Trained model and scaler
@@ -378,10 +421,13 @@ def predict_on_dev(
         use_cache: Whether to use feature caching
         hog_kwargs: Parameters for HOG extraction (used when method='combined')
         lbp_kwargs: Parameters for LBP extraction (used when method='combined')
+        cv_strategy: CV strategy used (for loading threshold)
+        n_splits: Number of splits used (for loading threshold)
+        n_components: PCA components used (for loading threshold)
         **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
-        dict with predictions, scores, and optimal threshold
+        dict with predictions, scores, and threshold used
     """
     base_dir = PROJECT_ROOT / "dataset"
 
@@ -414,11 +460,22 @@ def predict_on_dev(
 
     result = evaluate_svm(svm, dev_features_transformed, dev_labels)
 
-    optimal_threshold, eer = compute_eer_threshold(
-        dev_labels, result["calibrated_scores"]
-    )
-    print(f"  Dev EER: {eer:.4f}, Optimal Threshold: {optimal_threshold:.4f}")
+    # Use mean CV threshold if available, otherwise default to 0.5
+    optimal_threshold = load_cv_threshold(method, cv_strategy, n_splits, n_components)
+    threshold_source = "CV cache"
 
+    if optimal_threshold is None:
+        print("  No CV threshold found in cache, defaulting to 0.5")
+        optimal_threshold = 0.5
+        threshold_source = "default (0.5)"
+    else:
+        print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
+
+    dev_eer, _ = compute_eer_threshold(dev_labels, result["calibrated_scores"])
+
+    print(
+        f"  Dev EER: {dev_eer:.4f}, Using Threshold: {optimal_threshold:.4f} (from {threshold_source})"
+    )
     print(f"  Dev Accuracy: {result['accuracy']:.4f}")
     print(f"  Dev AUC: {result['auc']:.4f}")
 
@@ -440,47 +497,60 @@ def predict_on_dev(
         "accuracy": result["accuracy"],
         "auc": result["auc"],
         "optimal_threshold": optimal_threshold,
-        "eer": eer,
+        "eer": dev_eer,
     }
 
 
 def predict_on_eval(
     svm,
     scaler,
-    optimal_threshold,
     method,
     pca=None,
     use_cache=True,
     hog_kwargs=None,
     lbp_kwargs=None,
+    cv_strategy="kfold",
+    n_splits=2,
+    n_components=None,
     **feature_kwargs,
 ):
     """
-    Evaluate on eval set using EER threshold from dev.
+    Evaluate on eval set using mean CV threshold.
 
     Args:
         svm, scaler: Trained model and scaler
-        optimal_threshold: Threshold computed from dev set
         method: Feature extraction method ('hog', 'lbp', or 'combined')
         pca: Fitted PCA object (or None if not using PCA)
         use_cache: Whether to use feature caching
         hog_kwargs: Parameters for HOG extraction (used when method='combined')
         lbp_kwargs: Parameters for LBP extraction (used when method='combined')
+        cv_strategy: CV strategy used (for loading threshold)
+        n_splits: Number of splits used (for loading threshold)
+        n_components: PCA components used (for loading threshold)
         **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
-        dict with predictions and scores
+        dict with predictions, scores, and metrics (if labels available)
     """
     base_dir = PROJECT_ROOT / "dataset"
 
     print(f"\nEvaluating on eval set with {method.upper()}...")
 
-    print(f"  Using threshold from dev set: {optimal_threshold:.4f}")
-
     eval_dir = os.path.join(base_dir, "eval")
     if not os.path.exists(eval_dir):
         print("Eval directory not found. Skipping eval.")
         return None
+
+    # Use mean CV threshold if available, otherwise default to 0.5
+    optimal_threshold = load_cv_threshold(method, cv_strategy, n_splits, n_components)
+    threshold_source = "CV cache"
+
+    if optimal_threshold is None:
+        print("  No CV threshold found in cache, defaulting to 0.5")
+        optimal_threshold = 0.5
+        threshold_source = "default (0.5)"
+    else:
+        print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
 
     eval_images, eval_filenames = load_images(eval_dir)
 
@@ -532,7 +602,12 @@ def predict_on_eval(
 
 
 def main(
-    mode="train", cv_strategy="kfold", n_splits=2, n_components=None, method="hog"
+    mode="train",
+    cv_strategy="kfold",
+    n_splits=2,
+    n_components=None,
+    method="hog",
+    C=1.0,
 ):
     """
     Main training pipeline.
@@ -544,6 +619,7 @@ def main(
         n_splits: Number of folds for kfold strategy
         n_components: PCA components (int for number, float for variance ratio, None for no PCA)
         method: Feature extraction method ('hog', 'lbp', or 'combined')
+        C: SVM regularization parameter
     """
     base_dir = str(PROJECT_ROOT / "dataset")
 
@@ -571,40 +647,40 @@ def main(
     if mode == "train":
         print("\n" + "=" * 50)
         if method == "combined":
-            results = cross_validate(
+            cross_validate(
                 images,
                 labels,
                 filenames,
                 method="combined",
                 cv_strategy=cv_strategy,
                 n_splits=n_splits,
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 use_cache=True,
                 hog_kwargs=hog_params,
                 lbp_kwargs=lbp_params,
             )
         elif method == "hog":
-            results = cross_validate(
+            cross_validate(
                 images,
                 labels,
                 filenames,
                 method="hog",
                 cv_strategy=cv_strategy,
                 n_splits=n_splits,
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 **hog_params,
             )
         elif method == "lbp":
-            results = cross_validate(
+            cross_validate(
                 images,
                 labels,
                 filenames,
                 method="lbp",
                 cv_strategy=cv_strategy,
                 n_splits=n_splits,
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 **lbp_params,
             )
@@ -616,7 +692,7 @@ def main(
                 images,
                 labels,
                 method="combined",
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 hog_kwargs=hog_params,
                 lbp_kwargs=lbp_params,
@@ -626,7 +702,7 @@ def main(
                 images,
                 labels,
                 method="hog",
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 **hog_params,
             )
@@ -635,7 +711,7 @@ def main(
                 images,
                 labels,
                 method="lbp",
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 **lbp_params,
             )
@@ -648,16 +724,33 @@ def main(
                 scaler,
                 method="combined",
                 pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
                 hog_kwargs=hog_params,
                 lbp_kwargs=lbp_params,
             )
         elif method == "hog":
             dev_result = predict_on_dev(
-                svm, scaler, method="hog", pca=pca, **hog_params
+                svm,
+                scaler,
+                method="hog",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **hog_params,
             )
         elif method == "lbp":
             dev_result = predict_on_dev(
-                svm, scaler, method="lbp", pca=pca, **lbp_params
+                svm,
+                scaler,
+                method="lbp",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **lbp_params,
             )
 
         print("\n" + "=" * 50)
@@ -674,7 +767,7 @@ def main(
                 images,
                 labels,
                 method="combined",
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 hog_kwargs=hog_params,
                 lbp_kwargs=lbp_params,
@@ -684,7 +777,7 @@ def main(
                 images,
                 labels,
                 method="hog",
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 **hog_params,
             )
@@ -693,7 +786,7 @@ def main(
                 images,
                 labels,
                 method="lbp",
-                C=C_PARAM,
+                C=C,
                 n_components=n_components,
                 **lbp_params,
             )
@@ -706,37 +799,64 @@ def main(
                 scaler,
                 method="combined",
                 pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
                 hog_kwargs=hog_params,
                 lbp_kwargs=lbp_params,
             )
-        elif method == "hog":
-            dev_result = predict_on_dev(
-                svm, scaler, method="hog", pca=pca, **hog_params
-            )
-        elif method == "lbp":
-            dev_result = predict_on_dev(
-                svm, scaler, method="lbp", pca=pca, **lbp_params
-            )
-
-        threshold = dev_result["optimal_threshold"]
-
-        if method == "combined":
             eval_result = predict_on_eval(
                 svm,
                 scaler,
-                threshold,
                 method="combined",
                 pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
                 hog_kwargs=hog_params,
                 lbp_kwargs=lbp_params,
             )
         elif method == "hog":
+            dev_result = predict_on_dev(
+                svm,
+                scaler,
+                method="hog",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **hog_params,
+            )
             eval_result = predict_on_eval(
-                svm, scaler, threshold, method="hog", pca=pca, **hog_params
+                svm,
+                scaler,
+                method="hog",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **hog_params,
             )
         elif method == "lbp":
+            dev_result = predict_on_dev(
+                svm,
+                scaler,
+                method="lbp",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **lbp_params,
+            )
             eval_result = predict_on_eval(
-                svm, scaler, threshold, method="lbp", pca=pca, **lbp_params
+                svm,
+                scaler,
+                method="lbp",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **lbp_params,
             )
 
         print("\n" + "=" * 50)
@@ -744,6 +864,9 @@ def main(
         print(
             f"  {method.upper()} predictions saved to {PROJECT_ROOT / 'results' / f'image_{method}_eval.txt'}"
         )
+        if eval_result.get("accuracy") is not None:
+            print(f"  Eval Accuracy: {eval_result['accuracy']:.4f}")
+            print(f"  Eval AUC: {eval_result['auc']:.4f}")
 
 
 if __name__ == "__main__":
@@ -785,6 +908,12 @@ if __name__ == "__main__":
         default=None,
         help="PCA components: int (e.g., 150) or float 0-1 for variance (e.g., 0.95). None for no PCA.",
     )
+    parser.add_argument(
+        "--C",
+        type=float,
+        default=1.0,
+        help="SVM regularization parameter C (default: 1.0)",
+    )
 
     args = parser.parse_args()
 
@@ -801,4 +930,5 @@ if __name__ == "__main__":
         n_splits=args.n_splits,
         n_components=n_components,
         method=args.method,
+        C=args.C,
     )
