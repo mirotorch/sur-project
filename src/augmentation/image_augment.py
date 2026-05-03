@@ -14,8 +14,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 # Configuration
 ORIGINAL_DIRS = {
-    "target": PROJECT_ROOT / "dataset" / "target_train",
-    "non_target": PROJECT_ROOT / "dataset" / "non_target_train",
+    "target": PROJECT_ROOT / "dataset" / "target",
+    "non_target": PROJECT_ROOT / "dataset" / "non-target",
 }
 OUTPUT_DIRS = {
     "target": PROJECT_ROOT / "dataset" / "augmented" / "target_image_aug",
@@ -25,11 +25,11 @@ OUTPUT_DIRS = {
 # Augmentation parameters
 ROTATION_ANGLES = [-10, -5, 5, 10]
 SHIFT_PIXELS = [-8, -5, 5, 8]
-SCALE_FACTORS = [0.9, 1.1]
-NOISE_SNRS = [10, 20, 30]
+SCALE_FACTORS = [0.9, 1.1, 1.2]
+NOISE_SNRS = [10, 20, 30, 35]
 FLIP_HORIZONTAL = True
-BRIGHTNESS_FACTORS = [0.7, 1.3]
-CONTRAST_FACTORS = [0.7, 1.3]
+BRIGHTNESS_FACTORS = [0.5, 0.7, 1.3, 1.5]
+CONTRAST_FACTORS = [0.5, 0.7, 1.3, 1.5]
 
 
 def add_gaussian_noise(image, snr_db):

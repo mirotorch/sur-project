@@ -3,3 +3,7 @@ dataset
 docs
 results
 cache
+src/__pycache__
+src/extractors/__pycache__
+TODO.MD
+notes.md

@@ -16,8 +16,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 # Configuration
 SAMPLE_RATE = 16000
 ORIGINAL_DIRS = {
-    "target": PROJECT_ROOT / "dataset" / "target_train",
-    "non_target": PROJECT_ROOT / "dataset" / "non_target_train",
+    "target": PROJECT_ROOT / "dataset" / "target",
+    "non_target": PROJECT_ROOT / "dataset" / "non-target",
 }
 OUTPUT_DIRS = {
     "target": PROJECT_ROOT / "dataset" / "augmented" / "target_train_aug",

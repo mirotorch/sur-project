@@ -1,6 +1,7 @@
 """
 Image-based person detector using HOG and LBP features with SVM.
 Implements session-based cross-validation and generates prediction files.
+Supports combined HOG+LBP features with PCA dimensionality reduction.
 """
 
 import os
@@ -21,6 +22,8 @@ from utils import (compute_eer_threshold, load_dataset, load_images,
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
+
+C_PARAM = 0.001
 
 
 def ensure_cache_dir():
@@ -54,17 +57,14 @@ def extract_features_cached(images, method="hog", use_cache=True, **kwargs):
     """
     ensure_cache_dir()
 
-    # Create parameter string for cache key
     params_str = "_".join(f"{k}{v}" for k, v in sorted(kwargs.items()))
     dataset_hash = compute_dataset_hash(images)
     cache_path = get_cache_path(method, params_str, dataset_hash)
 
-    # Try to load from cache
     if use_cache and os.path.exists(cache_path):
         print(f"Loading cached {method} features from {cache_path}")
         return np.load(cache_path)
 
-    # Extract features
     print(f"Extracting {method} features...")
     start = time.time()
 
@@ -78,7 +78,6 @@ def extract_features_cached(images, method="hog", use_cache=True, **kwargs):
     elapsed = time.time() - start
     print(f"  Extracted {features.shape} in {elapsed:.2f}s")
 
-    # Save to cache
     if use_cache:
         np.save(cache_path, features)
         print(f"  Cached to {cache_path}")
@@ -86,7 +85,53 @@ def extract_features_cached(images, method="hog", use_cache=True, **kwargs):
     return features
 
 
-def train_svm(X_train, y_train, C=1.0):
+def extract_combined_features_cached(
+    images, use_cache=True, hog_kwargs=None, lbp_kwargs=None
+):
+    """
+    Extract HOG and LBP features and concatenate them.
+
+    Args:
+        images: Batch of images
+        use_cache: Whether to use cached features
+        hog_kwargs: Parameters for HOG extraction
+        lbp_kwargs: Parameters for LBP extraction
+
+    Returns:
+        Combined feature matrix (n_samples, n_hog + n_lbp)
+    """
+    if hog_kwargs is None:
+        hog_kwargs = {
+            "orientations": 9,
+            "pixels_per_cell": (8, 8),
+            "cells_per_block": (2, 2),
+            "normalize": True,
+        }
+    if lbp_kwargs is None:
+        lbp_kwargs = {
+            "radius": 1,
+            "neighbors": 8,
+            "use_uniform": True,
+            "grid_size": (4, 4),
+            "normalize": True,
+        }
+
+    # Extract individual features
+    hog_features = extract_features_cached(
+        images, method="hog", use_cache=use_cache, **hog_kwargs
+    )
+    lbp_features = extract_features_cached(
+        images, method="lbp", use_cache=use_cache, **lbp_kwargs
+    )
+
+    # Concatenate features
+    combined = np.concatenate([hog_features, lbp_features], axis=1)
+    print(f"  Combined features shape: {combined.shape}")
+
+    return combined
+
+
+def train_svm(X_train, y_train, C=C_PARAM):
     """
     Train SVM classifier.
 
@@ -117,7 +162,6 @@ def evaluate_svm(svm, X_test, y_test):
     """
     scores = svm.decision_function(X_test)
 
-    # Convert to probabilities (simple min-max normalization)
     score_min, score_max = scores.min(), scores.max()
     if score_max - score_min > 1e-10:
         calibrated_scores = (scores - score_min) / (score_max - score_min)
@@ -149,35 +193,39 @@ def cross_validate(
     method="hog",
     cv_strategy="kfold",
     n_splits=2,
-    C=1.0,
+    C=C_PARAM,
     n_components=None,
     use_cache=True,
+    hog_kwargs=None,
+    lbp_kwargs=None,
     **feature_kwargs,
 ):
     """
     Perform session-based cross-validation with SVM classifiers.
 
-    Supports multiple cross-validation strategies to prevent data leakage
-    from samples in the same recording session.
-
     Args:
         images: Image array
         labels: Labels array
         filenames: List of filenames
-        method: Feature extraction method ('hog' or 'lbp')
-        cv_strategy: Cross-validation strategy
-            - "kfold": Session-Aware K-Fold (default, faster)
-            - "loso": Leave-One-Session-Out (more comprehensive)
+        method: Feature extraction method ('hog', 'lbp', or 'combined')
+        cv_strategy: Cross-validation strategy ('kfold' or 'loso')
         n_splits: Number of folds (only used for kfold strategy)
         C: SVM regularization parameter
         n_components: PCA components (int for number, float for variance ratio, None for no PCA)
         use_cache: Whether to use feature caching
-        **feature_kwargs: Arguments for feature extraction
+        hog_kwargs: Parameters for HOG extraction (used when method='combined')
+        lbp_kwargs: Parameters for LBP extraction (used when method='combined')
+        **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
-        List of CV results (dict with fold info, metrics, and models)
+        List of CV results
     """
-    features = extract_features_cached(images, method, use_cache, **feature_kwargs)
+    if method == "combined":
+        features = extract_combined_features_cached(
+            images, use_cache=use_cache, hog_kwargs=hog_kwargs, lbp_kwargs=lbp_kwargs
+        )
+    else:
+        features = extract_features_cached(images, method, use_cache, **feature_kwargs)
 
     if cv_strategy.lower() == "kfold":
         cv_splits = k_fold(filenames, labels, n_splits)
@@ -206,12 +254,10 @@ def cross_validate(
             print(f"  Skipping fold - only one class present")
             continue
 
-        # Scale features
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_val_scaled = scaler.transform(X_val)
 
-        # Apply PCA if requested
         pca = None
         if n_components is not None:
             pca = PCA(n_components=n_components)
@@ -256,18 +302,28 @@ def cross_validate(
 
 
 def train_final_model(
-    images, labels, method="hog", C=1.0, n_components=None, use_cache=True, **feature_kwargs
+    images,
+    labels,
+    method="hog",
+    C=C_PARAM,
+    n_components=None,
+    use_cache=True,
+    hog_kwargs=None,
+    lbp_kwargs=None,
+    **feature_kwargs,
 ):
     """
     Train final model on all training data.
 
     Args:
         images, labels: Full training dataset
-        method: Feature extraction method
+        method: Feature extraction method ('hog', 'lbp', or 'combined')
         C: SVM regularization
         n_components: PCA components (int for number, float for variance ratio, None for no PCA)
         use_cache: Whether to use feature caching
-        **feature_kwargs: Arguments for feature extraction
+        hog_kwargs: Parameters for HOG extraction (used when method='combined')
+        lbp_kwargs: Parameters for LBP extraction (used when method='combined')
+        **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
         tuple: (svm, scaler, pca, feature_size)
@@ -276,7 +332,13 @@ def train_final_model(
     if n_components is not None:
         print(f"  Using PCA with n_components={n_components}")
 
-    X = extract_features_cached(images, method, use_cache, **feature_kwargs)
+    if method == "combined":
+        X = extract_combined_features_cached(
+            images, use_cache=use_cache, hog_kwargs=hog_kwargs, lbp_kwargs=lbp_kwargs
+        )
+    else:
+        X = extract_features_cached(images, method, use_cache, **feature_kwargs)
+
     print(f"Feature shape: {X.shape}")
 
     scaler = StandardScaler()
@@ -296,16 +358,27 @@ def train_final_model(
     return svm, scaler, pca, X_transformed.shape[1]
 
 
-def predict_on_dev(svm, scaler, method, pca=None, use_cache=True, **feature_kwargs):
+def predict_on_dev(
+    svm,
+    scaler,
+    method,
+    pca=None,
+    use_cache=True,
+    hog_kwargs=None,
+    lbp_kwargs=None,
+    **feature_kwargs,
+):
     """
     Generate predictions on dev set, compute EER threshold, and save results.
 
     Args:
         svm, scaler: Trained model and scaler
-        method: Feature extraction method
+        method: Feature extraction method ('hog', 'lbp', or 'combined')
         pca: Fitted PCA object (or None if not using PCA)
         use_cache: Whether to use feature caching
-        **feature_kwargs: Arguments for feature extraction
+        hog_kwargs: Parameters for HOG extraction (used when method='combined')
+        lbp_kwargs: Parameters for LBP extraction (used when method='combined')
+        **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
         dict with predictions, scores, and optimal threshold
@@ -323,7 +396,15 @@ def predict_on_dev(svm, scaler, method, pca=None, use_cache=True, **feature_kwar
     dev_fnames_all = dev_filenames + non_target_fnames
     dev_labels = np.array([1] * len(dev_images) + [0] * len(non_target_dev))
 
-    dev_features = extract_features_cached(dev_all, method, use_cache, **feature_kwargs)
+    if method == "combined":
+        dev_features = extract_combined_features_cached(
+            dev_all, use_cache=use_cache, hog_kwargs=hog_kwargs, lbp_kwargs=lbp_kwargs
+        )
+    else:
+        dev_features = extract_features_cached(
+            dev_all, method, use_cache, **feature_kwargs
+        )
+
     dev_features_scaled = scaler.transform(dev_features)
 
     if pca is not None:
@@ -363,17 +444,29 @@ def predict_on_dev(svm, scaler, method, pca=None, use_cache=True, **feature_kwar
     }
 
 
-def predict_on_eval(svm, scaler, optimal_threshold, method, pca=None, use_cache=True, **feature_kwargs):
+def predict_on_eval(
+    svm,
+    scaler,
+    optimal_threshold,
+    method,
+    pca=None,
+    use_cache=True,
+    hog_kwargs=None,
+    lbp_kwargs=None,
+    **feature_kwargs,
+):
     """
     Evaluate on eval set using EER threshold from dev.
 
     Args:
         svm, scaler: Trained model and scaler
         optimal_threshold: Threshold computed from dev set
-        method: Feature extraction method
+        method: Feature extraction method ('hog', 'lbp', or 'combined')
         pca: Fitted PCA object (or None if not using PCA)
         use_cache: Whether to use feature caching
-        **feature_kwargs: Arguments for feature extraction
+        hog_kwargs: Parameters for HOG extraction (used when method='combined')
+        lbp_kwargs: Parameters for LBP extraction (used when method='combined')
+        **feature_kwargs: Arguments for feature extraction (for single method)
 
     Returns:
         dict with predictions and scores
@@ -391,7 +484,18 @@ def predict_on_eval(svm, scaler, optimal_threshold, method, pca=None, use_cache=
 
     eval_images, eval_filenames = load_images(eval_dir)
 
-    eval_features = extract_features_cached(eval_images, method, use_cache, **feature_kwargs)
+    if method == "combined":
+        eval_features = extract_combined_features_cached(
+            eval_images,
+            use_cache=use_cache,
+            hog_kwargs=hog_kwargs,
+            lbp_kwargs=lbp_kwargs,
+        )
+    else:
+        eval_features = extract_features_cached(
+            eval_images, method, use_cache, **feature_kwargs
+        )
+
     eval_features_scaled = scaler.transform(eval_features)
 
     if pca is not None:
@@ -413,7 +517,9 @@ def predict_on_eval(svm, scaler, optimal_threshold, method, pca=None, use_cache=
     os.makedirs(output_dir, exist_ok=True)
 
     output_file = os.path.join(output_dir, f"image_{method}_eval.txt")
-    save_predictions(output_file, eval_filenames, eval_calibrated, threshold=optimal_threshold)
+    save_predictions(
+        output_file, eval_filenames, eval_calibrated, threshold=optimal_threshold
+    )
 
     print(f"  Eval predictions saved to {output_file}")
 
@@ -425,7 +531,9 @@ def predict_on_eval(svm, scaler, optimal_threshold, method, pca=None, use_cache=
     }
 
 
-def main(mode="train", cv_strategy="kfold", n_splits=2, n_components=None):
+def main(
+    mode="train", cv_strategy="kfold", n_splits=2, n_components=None, method="hog"
+):
     """
     Main training pipeline.
 
@@ -435,6 +543,7 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, n_components=None):
         cv_strategy: Cross-validation strategy ("kfold" or "loso")
         n_splits: Number of folds for kfold strategy
         n_components: PCA components (int for number, float for variance ratio, None for no PCA)
+        method: Feature extraction method ('hog', 'lbp', or 'combined')
     """
     base_dir = str(PROJECT_ROOT / "dataset")
 
@@ -461,84 +570,179 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, n_components=None):
 
     if mode == "train":
         print("\n" + "=" * 50)
-        hog_results = cross_validate(
-            images,
-            labels,
-            filenames,
-            method="hog",
-            cv_strategy=cv_strategy,
-            n_splits=n_splits,
-            C=1.0,
-            n_components=n_components,
-            **hog_params,
-        )
+        if method == "combined":
+            results = cross_validate(
+                images,
+                labels,
+                filenames,
+                method="combined",
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                C=C_PARAM,
+                n_components=n_components,
+                use_cache=True,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            results = cross_validate(
+                images,
+                labels,
+                filenames,
+                method="hog",
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                C=C_PARAM,
+                n_components=n_components,
+                **hog_params,
+            )
+        elif method == "lbp":
+            results = cross_validate(
+                images,
+                labels,
+                filenames,
+                method="lbp",
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                C=C_PARAM,
+                n_components=n_components,
+                **lbp_params,
+            )
 
-        print("\n" + "=" * 50)
-        lbp_results = cross_validate(
-            images,
-            labels,
-            filenames,
-            method="lbp",
-            cv_strategy=cv_strategy,
-            n_splits=n_splits,
-            C=1.0,
-            n_components=n_components,
-            **lbp_params,
-        )
     elif mode == "dev":
         print("\n" + "=" * 50)
-        hog_svm, hog_scaler, hog_pca, hog_dim = train_final_model(
-            images, labels, method="hog", C=1.0, n_components=n_components, **hog_params
-        )
-        print(f"HOG feature dimension: {hog_dim}")
+        if method == "combined":
+            svm, scaler, pca, feat_dim = train_final_model(
+                images,
+                labels,
+                method="combined",
+                C=C_PARAM,
+                n_components=n_components,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            svm, scaler, pca, feat_dim = train_final_model(
+                images,
+                labels,
+                method="hog",
+                C=C_PARAM,
+                n_components=n_components,
+                **hog_params,
+            )
+        elif method == "lbp":
+            svm, scaler, pca, feat_dim = train_final_model(
+                images,
+                labels,
+                method="lbp",
+                C=C_PARAM,
+                n_components=n_components,
+                **lbp_params,
+            )
 
-        print("\n" + "=" * 50)
-        lbp_svm, lbp_scaler, lbp_pca, lbp_dim = train_final_model(
-            images, labels, method="lbp", C=1.0, n_components=n_components, **lbp_params
-        )
-        print(f"LBP feature dimension: {lbp_dim}")
+        print(f"{method.upper()} feature dimension: {feat_dim}")
 
-        hog_dev = predict_on_dev(hog_svm, hog_scaler, "hog", pca=hog_pca, **hog_params)
-        lbp_dev = predict_on_dev(lbp_svm, lbp_scaler, "lbp", pca=lbp_pca, **lbp_params)
+        if method == "combined":
+            dev_result = predict_on_dev(
+                svm,
+                scaler,
+                method="combined",
+                pca=pca,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            dev_result = predict_on_dev(
+                svm, scaler, method="hog", pca=pca, **hog_params
+            )
+        elif method == "lbp":
+            dev_result = predict_on_dev(
+                svm, scaler, method="lbp", pca=pca, **lbp_params
+            )
 
         print("\n" + "=" * 50)
         print("Final Results:")
         print(
-            f"  HOG - Dev Accuracy: {hog_dev['accuracy']:.4f}, AUC: {hog_dev['auc']:.4f}"
-        )
-        print(
-            f"  LBP - Dev Accuracy: {lbp_dev['accuracy']:.4f}, AUC: {lbp_dev['auc']:.4f}"
+            f"  {method.upper()} - Dev Accuracy: {dev_result['accuracy']:.4f}, AUC: {dev_result['auc']:.4f}"
         )
         print(f"\nResults saved to {PROJECT_ROOT / 'results'}")
+
     elif mode == "eval":
         print("\n" + "=" * 50)
-        hog_svm, hog_scaler, hog_pca, hog_dim = train_final_model(
-            images, labels, method="hog", C=1.0, n_components=n_components, **hog_params
-        )
-        print(f"HOG feature dimension: {hog_dim}")
+        if method == "combined":
+            svm, scaler, pca, feat_dim = train_final_model(
+                images,
+                labels,
+                method="combined",
+                C=C_PARAM,
+                n_components=n_components,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            svm, scaler, pca, feat_dim = train_final_model(
+                images,
+                labels,
+                method="hog",
+                C=C_PARAM,
+                n_components=n_components,
+                **hog_params,
+            )
+        elif method == "lbp":
+            svm, scaler, pca, feat_dim = train_final_model(
+                images,
+                labels,
+                method="lbp",
+                C=C_PARAM,
+                n_components=n_components,
+                **lbp_params,
+            )
 
-        print("\n" + "=" * 50)
-        lbp_svm, lbp_scaler, lbp_pca, lbp_dim = train_final_model(
-            images, labels, method="lbp", C=1.0, n_components=n_components, **lbp_params
-        )
-        print(f"LBP feature dimension: {lbp_dim}")
+        print(f"{method.upper()} feature dimension: {feat_dim}")
 
-        hog_dev = predict_on_dev(hog_svm, hog_scaler, 'hog', pca=hog_pca, **hog_params)
-        hog_threshold = hog_dev['optimal_threshold']
+        if method == "combined":
+            dev_result = predict_on_dev(
+                svm,
+                scaler,
+                method="combined",
+                pca=pca,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            dev_result = predict_on_dev(
+                svm, scaler, method="hog", pca=pca, **hog_params
+            )
+        elif method == "lbp":
+            dev_result = predict_on_dev(
+                svm, scaler, method="lbp", pca=pca, **lbp_params
+            )
 
-        lbp_dev = predict_on_dev(lbp_svm, lbp_scaler, 'lbp', pca=lbp_pca, **lbp_params)
-        lbp_threshold = lbp_dev['optimal_threshold']
+        threshold = dev_result["optimal_threshold"]
 
-        hog_eval = predict_on_eval(hog_svm, hog_scaler, hog_threshold, "hog", pca=hog_pca, **hog_params)
-        lbp_eval = predict_on_eval(lbp_svm, lbp_scaler, lbp_threshold, "lbp", pca=lbp_pca, **lbp_params)
+        if method == "combined":
+            eval_result = predict_on_eval(
+                svm,
+                scaler,
+                threshold,
+                method="combined",
+                pca=pca,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            eval_result = predict_on_eval(
+                svm, scaler, threshold, method="hog", pca=pca, **hog_params
+            )
+        elif method == "lbp":
+            eval_result = predict_on_eval(
+                svm, scaler, threshold, method="lbp", pca=pca, **lbp_params
+            )
 
         print("\n" + "=" * 50)
         print("Final Results (Eval):")
         print(
-            f"  HOG predictions saved to {PROJECT_ROOT / 'results' / 'image_hog_eval.txt'}"
-        )
-        print(
-            f"  LBP predictions saved to {PROJECT_ROOT / 'results' / 'image_lbp_eval.txt'}"
+            f"  {method.upper()} predictions saved to {PROJECT_ROOT / 'results' / f'image_{method}_eval.txt'}"
         )
 
 
@@ -569,6 +773,13 @@ if __name__ == "__main__":
         help="train: cross-validation, dev: train on all dev data and evaluate on dev, eval: train on dev and predict on eval",
     )
     parser.add_argument(
+        "--method",
+        type=str,
+        choices=["hog", "lbp", "combined"],
+        default="hog",
+        help="Feature extraction method (default: hog). 'combined' concatenates HOG+LBP with PCA",
+    )
+    parser.add_argument(
         "--pca-components",
         type=str,
         default=None,
@@ -584,4 +795,10 @@ if __name__ == "__main__":
         except ValueError:
             n_components = float(args.pca_components)
 
-    main(mode=args.mode, cv_strategy=args.cv_strategy, n_splits=args.n_splits, n_components=n_components)
+    main(
+        mode=args.mode,
+        cv_strategy=args.cv_strategy,
+        n_splits=args.n_splits,
+        n_components=n_components,
+        method=args.method,
+    )

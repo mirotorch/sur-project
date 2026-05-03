@@ -90,23 +90,23 @@ def load_dataset(base_dir, use_augmented=True):
     labels = []
     filenames = []
 
-    # Target training data
-    target_dir = base_dir / "target_train"
+    # Target data (from target/ and non-target/ directories)
+    target_dir = base_dir / "target"
     if target_dir.exists():
         imgs, fnames = load_images(target_dir)
         images.append(imgs)
         labels.extend([1] * len(imgs))
         filenames.extend(fnames)
-        print(f"Loaded {len(imgs)} target training images")
+        print(f"Loaded {len(imgs)} target images")
 
-    # Non-target training data
-    non_target_dir = base_dir / "non_target_train"
+    # Non-target data
+    non_target_dir = base_dir / "non-target"
     if non_target_dir.exists():
         imgs, fnames = load_images(non_target_dir)
         images.append(imgs)
         labels.extend([0] * len(imgs))
         filenames.extend(fnames)
-        print(f"Loaded {len(imgs)} non-target training images")
+        print(f"Loaded {len(imgs)} non-target images")
 
     # Augmented data
     if use_augmented:
