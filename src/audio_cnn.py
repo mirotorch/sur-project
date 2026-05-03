@@ -13,9 +13,9 @@ import torch.nn.functional as F
 from sklearn.metrics import accuracy_score, roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
-from cross_validation.session_cv import session_based_cv
 from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
-from utils import save_predictions
+from session_cv import loso
+from utils import compute_eer_threshold, save_predictions
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -351,7 +351,7 @@ def train_final_model(features, labels, epochs=100):
 
 def predict_on_dev(model, trainer, base_dir=None):
     """
-    Generate predictions on dev set.
+    Generate predictions on dev set and compute EER threshold.
 
     Args:
         model: Trained CNN model
@@ -359,7 +359,7 @@ def predict_on_dev(model, trainer, base_dir=None):
         base_dir: Dataset base directory (default: PROJECT_ROOT / "dataset")
 
     Returns:
-        dict with predictions
+        dict with predictions and optimal threshold
     """
     if base_dir is None:
         base_dir = PROJECT_ROOT / "dataset"
@@ -370,8 +370,13 @@ def predict_on_dev(model, trainer, base_dir=None):
 
     extractor = MFCCExtractor()
 
-    target_dev_dir = base_dir / "target_dev"
-    non_target_dev_dir = base_dir / "non_target_dev"
+    target_dev_dir = base_dir / "target"
+    if not target_dev_dir.exists():
+        target_dev_dir = base_dir / "target_dev"
+
+    non_target_dev_dir = base_dir / "non-target"
+    if not non_target_dev_dir.exists():
+        non_target_dev_dir = base_dir / "non_target_dev"
 
     target_paths, target_fnames = _get_audio_files(str(target_dev_dir))
     non_target_paths, non_target_fnames = _get_audio_files(str(non_target_dev_dir))
@@ -394,8 +399,12 @@ def predict_on_dev(model, trainer, base_dir=None):
 
     scores = trainer.predict(loader)
 
+    # Compute EER threshold
+    optimal_threshold, eer = compute_eer_threshold(all_labels, scores)
+    print(f"  Dev EER: {eer:.4f}, Optimal Threshold: {optimal_threshold:.4f}")
+
     auc = roc_auc_score(all_labels, scores)
-    predictions = (scores > 0.5).astype(int)
+    predictions = (scores > optimal_threshold).astype(int)
     acc = accuracy_score(all_labels, predictions)
 
     print(f"  Dev Accuracy: {acc:.4f}")
@@ -404,7 +413,7 @@ def predict_on_dev(model, trainer, base_dir=None):
     output_dir = PROJECT_ROOT / "results"
     os.makedirs(output_dir, exist_ok=True)
     output_file = output_dir / "audio_cnn.txt"
-    save_predictions(str(output_file), all_fnames, scores)
+    save_predictions(str(output_file), all_fnames, scores, threshold=optimal_threshold)
 
     return {
         "filenames": all_fnames,
@@ -412,6 +421,8 @@ def predict_on_dev(model, trainer, base_dir=None):
         "scores": scores,
         "accuracy": acc,
         "auc": auc,
+        "optimal_threshold": optimal_threshold,
+        "eer": eer,
     }
 
 
@@ -424,7 +435,77 @@ def _get_audio_files(directory):
     return paths, fnames
 
 
-def main():
+def predict_on_eval(model, trainer, optimal_threshold, base_dir=None):
+    """
+    Evaluate on eval set using EER threshold from dev.
+
+    Args:
+        model: Trained CNN model
+        trainer: CNNTrainer instance
+        optimal_threshold: Threshold computed from dev set
+        base_dir: Dataset base directory (default: PROJECT_ROOT / "dataset")
+
+    Returns:
+        dict with predictions
+    """
+    if base_dir is None:
+        base_dir = PROJECT_ROOT / "dataset"
+    else:
+        base_dir = Path(base_dir)
+
+    print("\nEvaluating on eval set...")
+
+    extractor = MFCCExtractor()
+
+    # Use the threshold passed from dev set
+    print(f"  Using threshold from dev set: {optimal_threshold:.4f}")
+
+    # Predict on eval set
+    eval_dir = base_dir / "eval"
+    if not eval_dir.exists():
+        print("Eval directory not found. Skipping eval.")
+        return None
+
+    eval_paths, eval_fnames = _get_audio_files(str(eval_dir))
+    eval_features = extractor.extract_batch(eval_paths, use_cache=True)
+
+    # Dummy labels since eval set has no ground truth
+    eval_dataset = AudioDataset(eval_features, [0] * len(eval_paths))
+    use_cuda = torch.cuda.is_available()
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=64,
+        shuffle=False,
+        pin_memory=use_cuda,
+        num_workers=4 if use_cuda else 0,
+    )
+
+    scores = trainer.predict(eval_loader)
+    predictions = (scores > optimal_threshold).astype(int)
+
+    output_dir = PROJECT_ROOT / "results"
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = output_dir / "audio_cnn_eval.txt"
+    save_predictions(str(output_file), eval_fnames, scores, threshold=optimal_threshold)
+
+    print(f"  Eval predictions saved to {output_file}")
+
+    return {
+        "filenames": eval_fnames,
+        "scores": scores,
+        "predictions": predictions,
+        "optimal_threshold": optimal_threshold,
+    }
+
+
+def main(mode="train"):
+    """
+    Main training pipeline.
+
+    Args:
+        mode: One of "train" (cross-validation), "dev" (train on all dev data),
+             or "eval" (train on dev and predict on eval)
+    """
     base_dir = str(PROJECT_ROOT / "dataset")
 
     print("Loading audio dataset with MFCC features...")
@@ -436,19 +517,51 @@ def main():
     )
     print(f"Feature shape: {features.shape}")
 
-    cnn_results = cross_validate_cnn(features, labels, filenames, n_splits=2, epochs=10)
+    if mode == "train":
+        cnn_results = cross_validate_cnn(
+            features, labels, filenames, n_splits=2, epochs=10
+        )
 
-    print("\n" + "=" * 50)
-    model, trainer = train_final_model(features, labels, epochs=20)
+    elif mode == "dev":
+        print("\n" + "=" * 50)
+        model, trainer = train_final_model(features, labels, epochs=20)
 
-    dev_results = predict_on_dev(model, trainer, base_dir)
+        dev_results = predict_on_dev(model, trainer, base_dir)
 
-    print("\n" + "=" * 50)
-    print("Final Results:")
-    print(f"  Dev Accuracy: {dev_results['accuracy']:.4f}")
-    print(f"  Dev AUC: {dev_results['auc']:.4f}")
-    print(f"\nResults saved to {PROJECT_ROOT / 'results' / 'audio_cnn.txt'}")
+        print("\n" + "=" * 50)
+        print("Final Results:")
+        print(f"  Dev Accuracy: {dev_results['accuracy']:.4f}")
+        print(f"  Dev AUC: {dev_results['auc']:.4f}")
+        print(f"\nResults saved to {PROJECT_ROOT / 'results' / 'audio_cnn.txt'}")
+
+    elif mode == "eval":
+        print("\n" + "=" * 50)
+        model, trainer = train_final_model(features, labels, epochs=20)
+
+        dev_results = predict_on_dev(model, trainer, base_dir)
+
+        eval_results = predict_on_eval(
+            model, trainer, dev_results["optimal_threshold"], base_dir
+        )
+
+        print("\n" + "=" * 50)
+        print("Final Results (Eval):")
+        print(
+            f"  Eval predictions saved to {PROJECT_ROOT / 'results' / 'audio_cnn_eval.txt'}"
+        )
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["train", "dev", "eval"],
+        default="train",
+        help="train: cross-validation, dev: train on all dev data and evaluate on dev, eval: train on dev and predict on eval",
+    )
+
+    args = parser.parse_args()
+    main(mode=args.mode)

@@ -139,10 +139,21 @@ class MFCCExtractor:
         cache_file = os.path.join(
             cache_dir, f"mfcc_n{self.n_mfcc}_t{self.fixed_time_steps}.npy"
         )
+        cache_meta_file = os.path.join(
+            cache_dir, f"mfcc_n{self.n_mfcc}_t{self.fixed_time_steps}_meta.npy"
+        )
 
-        if use_cache and os.path.exists(cache_file):
-            print(f"Loading cached MFCC features from {cache_file}")
-            return np.load(cache_file)
+        if use_cache and os.path.exists(cache_file) and os.path.exists(cache_meta_file):
+            cached_paths = np.load(cache_meta_file, allow_pickle=True)
+            if len(cached_paths) == len(audio_paths) and all(
+                str(a) == str(b) for a, b in zip(cached_paths, audio_paths)
+            ):
+                print(f"Loading cached MFCC features from {cache_file}")
+                return np.load(cache_file)
+            else:
+                print("Cache mismatch detected, regenerating features...")
+
+        print(f"Extracting MFCC features for {len(audio_paths)} files...")
 
         print(f"Extracting MFCC features for {len(audio_paths)} files...")
         features = []
@@ -160,6 +171,7 @@ class MFCCExtractor:
 
         if use_cache:
             np.save(cache_file, features)
+            np.save(cache_meta_file, np.array(audio_paths, dtype=object))
             print(f"Cached features to {cache_file}")
 
         return features
@@ -190,6 +202,8 @@ def load_audio_dataset(base_dir=None, use_augmented=True, fixed_time_steps=300):
 
     # Target training data
     target_dir = base_dir / "target_train"
+    if not target_dir.exists():
+        target_dir = base_dir / "target"
     if target_dir.exists():
         paths, fnames = _get_audio_files(target_dir)
         all_paths.extend(paths)
@@ -199,6 +213,8 @@ def load_audio_dataset(base_dir=None, use_augmented=True, fixed_time_steps=300):
 
     # Non-target training data
     non_target_dir = base_dir / "non_target_train"
+    if not non_target_dir.exists():
+        non_target_dir = base_dir / "non-target"
     if non_target_dir.exists():
         paths, fnames = _get_audio_files(non_target_dir)
         all_paths.extend(paths)

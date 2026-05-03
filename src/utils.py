@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from sklearn.metrics import roc_curve
 
 
 def parse_filename(filename):
@@ -157,6 +158,28 @@ def preprocess_image(img, target_size=(80, 80)):
         img = img / 255.0
 
     return img.astype(np.float32)
+
+
+def compute_eer_threshold(labels, scores):
+    """
+    Compute optimal EER threshold where FPR ≈ FNR.
+
+    Args:
+        labels: Ground truth labels (0 or 1)
+        scores: Prediction scores (higher = more confident target)
+
+    Returns:
+        tuple: (optimal_threshold, eer_value)
+    """
+    fpr, tpr, thresholds = roc_curve(labels, scores)
+    fnr = 1 - tpr
+
+    # Find threshold where FPR ≈ FNR
+    optimal_idx = np.argmin(np.abs(fpr - fnr))
+    optimal_threshold = thresholds[optimal_idx]
+    eer = (fpr[optimal_idx] + fnr[optimal_idx]) / 2
+
+    return optimal_threshold, eer
 
 
 def save_predictions(filename, filenames, scores, threshold=0.5):

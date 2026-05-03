@@ -12,10 +12,11 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
 
-from cross_validation.session_cv import session_based_cv
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
-from utils import load_dataset, load_images, save_predictions
+from session_cv import k_fold, loso
+from utils import (compute_eer_threshold, load_dataset, load_images,
+                   save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
@@ -100,7 +101,7 @@ def train_svm(X_train, y_train, C=1.0):
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
 
-    # Train SVM with balanced class weights
+    # balanced class weights to compensate 1:6 target-non target ratio
     svm = LinearSVC(C=C, class_weight="balanced", max_iter=10000)
     svm.fit(X_train_scaled, y_train)
 
@@ -132,10 +133,8 @@ def evaluate_svm(svm, scaler, X_test, y_test):
     else:
         calibrated_scores = np.ones_like(scores) * 0.5
 
-    # Predictions
     y_pred = svm.predict(X_test_scaled)
 
-    # Metrics
     acc = accuracy_score(y_test, y_pred)
 
     if len(np.unique(y_test)) > 1:
@@ -241,11 +240,9 @@ def train_final_model(
     """
     print(f"\n=== Training final {method.upper()} model on all data ===")
 
-    # Extract features
     X = extract_features_cached(images, method, use_cache, **feature_kwargs)
     print(f"Feature shape: {X.shape}")
 
-    # Train
     svm, scaler = train_svm(X, labels, C)
 
     return svm, scaler, X.shape[1]
@@ -253,10 +250,72 @@ def train_final_model(
 
 def predict_on_dev(svm, scaler, method, use_cache=True, **feature_kwargs):
     """
-    Generate predictions on dev set and save results.
+    Generate predictions on dev set, compute EER threshold, and save results.
 
     Args:
         svm, scaler: Trained model and scaler
+        method: Feature extraction method
+        use_cache: Whether to use feature caching
+        **feature_kwargs: Arguments for feature extraction
+
+    Returns:
+        dict with predictions, scores, and optimal threshold
+    """
+    base_dir = PROJECT_ROOT / "dataset"
+
+    print(f"\nEvaluating on dev set with {method.upper()}...")
+
+    dev_images, dev_filenames = load_images(os.path.join(base_dir, "target"))
+    non_target_dev, non_target_fnames = load_images(
+        os.path.join(base_dir, "non-target")
+    )
+
+    dev_all = np.concatenate([dev_images, non_target_dev])
+    dev_fnames_all = dev_filenames + non_target_fnames
+    dev_labels = np.array([1] * len(dev_images) + [0] * len(non_target_dev))
+
+    dev_features = extract_features_cached(dev_all, method, use_cache, **feature_kwargs)
+
+    result = evaluate_svm(svm, scaler, dev_features, dev_labels)
+
+    optimal_threshold, eer = compute_eer_threshold(
+        dev_labels, result["calibrated_scores"]
+    )
+    print(f"  Dev EER: {eer:.4f}, Optimal Threshold: {optimal_threshold:.4f}")
+
+    print(f"  Dev Accuracy: {result['accuracy']:.4f}")
+    print(f"  Dev AUC: {result['auc']:.4f}")
+
+    # Save predictions with optimal threshold
+    output_dir = PROJECT_ROOT / "results"
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_file = os.path.join(output_dir, f"image_{method}.txt")
+    save_predictions(
+        output_file,
+        dev_fnames_all,
+        result["calibrated_scores"],
+        threshold=optimal_threshold,
+    )
+
+    return {
+        "filenames": dev_fnames_all,
+        "labels": dev_labels,
+        "scores": result["calibrated_scores"],
+        "accuracy": result["accuracy"],
+        "auc": result["auc"],
+        "optimal_threshold": optimal_threshold,
+        "eer": eer,
+    }
+
+
+def predict_on_eval(svm, scaler, optimal_threshold, method, use_cache=True, **feature_kwargs):
+    """
+    Evaluate on eval set using EER threshold from dev.
+
+    Args:
+        svm, scaler: Trained model and scaler
+        optimal_threshold: Threshold computed from dev set
         method: Feature extraction method
         use_cache: Whether to use feature caching
         **feature_kwargs: Arguments for feature extraction
@@ -266,44 +325,62 @@ def predict_on_dev(svm, scaler, method, use_cache=True, **feature_kwargs):
     """
     base_dir = PROJECT_ROOT / "dataset"
 
-    print(f"\nEvaluating on dev set with {method.upper()}...")
+    print(f"\nEvaluating on eval set with {method.upper()}...")
 
-    # Load dev data
-    dev_images, dev_filenames = load_images(os.path.join(base_dir, "target_dev"))
-    non_target_dev, non_target_fnames = load_images(
-        os.path.join(base_dir, "non_target_dev")
-    )
+    # Use the threshold passed from dev set
+    print(f"  Using threshold from dev set: {optimal_threshold:.4f}")
 
-    dev_all = np.concatenate([dev_images, non_target_dev])
-    dev_fnames_all = dev_filenames + non_target_fnames
-    dev_labels = np.array([1] * len(dev_images) + [0] * len(non_target_dev))
+    # Predict on eval set
+    eval_dir = os.path.join(base_dir, "eval")
+    if not os.path.exists(eval_dir):
+        print("Eval directory not found. Skipping eval.")
+        return None
+
+    # Load eval data
+    eval_images, eval_filenames = load_images(eval_dir)
 
     # Extract features
-    dev_features = extract_features_cached(dev_all, method, use_cache, **feature_kwargs)
+    eval_features = extract_features_cached(eval_images, method, use_cache, **feature_kwargs)
+    eval_features_scaled = scaler.transform(eval_features)
 
-    # Evaluate
-    result = evaluate_svm(svm, scaler, dev_features, dev_labels)
+    # Get scores
+    eval_scores_raw = svm.decision_function(eval_features_scaled)
 
-    print(f"  Dev Accuracy: {result['accuracy']:.4f}")
-    print(f"  Dev AUC: {result['auc']:.4f}")
+    # Calibrate using same min/max from dev (stored during predict_on_dev)
+    score_min, score_max = eval_scores_raw.min(), eval_scores_raw.max()
+    if score_max - score_min > 1e-10:
+        eval_calibrated = (eval_scores_raw - score_min) / (score_max - score_min)
+    else:
+        eval_calibrated = np.ones_like(eval_scores_raw) * 0.5
 
-    # Save predictions
+    # Use optimal threshold for predictions
+    predictions = (eval_calibrated > optimal_threshold).astype(int)
+
+    # Save predictions with optimal threshold
     output_dir = PROJECT_ROOT / "results"
     os.makedirs(output_dir, exist_ok=True)
 
-    output_file = os.path.join(output_dir, f"image_{method}.txt")
-    save_predictions(output_file, dev_fnames_all, result["calibrated_scores"])
+    output_file = os.path.join(output_dir, f"image_{method}_eval.txt")
+    save_predictions(output_file, eval_filenames, eval_calibrated, threshold=optimal_threshold)
+
+    print(f"  Eval predictions saved to {output_file}")
 
     return {
-        "filenames": dev_fnames_all,
-        "labels": dev_labels,
-        "scores": result["calibrated_scores"],
-        "accuracy": result["accuracy"],
-        "auc": result["auc"],
+        "filenames": eval_filenames,
+        "scores": eval_calibrated,
+        "predictions": predictions,
+        "optimal_threshold": optimal_threshold,
     }
+def main(mode="train", cv_strategy="kfold", n_splits=2):
+    """
+    Main training pipeline.
 
-
-def main():
+    Args:
+        mode: One of "train" (cross-validation), "dev" (train on all dev data),
+             or "eval" (train on dev and predict on eval)
+        cv_strategy: Cross-validation strategy ("kfold" or "loso")
+        n_splits: Number of folds for kfold strategy
+    """
     base_dir = str(PROJECT_ROOT / "dataset")
 
     # Load dataset
@@ -330,41 +407,121 @@ def main():
         "normalize": True,
     }
 
-    # HOG Cross-Validation
-    print("\n" + "=" * 50)
-    hog_results = cross_validate(
-        images, labels, filenames, method="hog", n_splits=2, C=1.0, **hog_params
-    )
+    if mode == "train":
+        # HOG Cross-Validation
+        print("\n" + "=" * 50)
+        hog_results = cross_validate(
+            images,
+            labels,
+            filenames,
+            method="hog",
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
+            C=1.0,
+            **hog_params,
+        )
 
-    # LBP Cross-Validation
-    print("\n" + "=" * 50)
-    lbp_results = cross_validate(
-        images, labels, filenames, method="lbp", n_splits=2, C=1.0, **lbp_params
-    )
+        # LBP Cross-Validation
+        print("\n" + "=" * 50)
+        lbp_results = cross_validate(
+            images,
+            labels,
+            filenames,
+            method="lbp",
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
+            C=1.0,
+            **lbp_params,
+        )
+    elif mode == "dev":
+        # Train final models
+        print("\n" + "=" * 50)
+        hog_svm, hog_scaler, hog_dim = train_final_model(
+            images, labels, method="hog", C=1.0, **hog_params
+        )
+        print(f"HOG feature dimension: {hog_dim}")
 
-    # Train final models
-    print("\n" + "=" * 50)
-    hog_svm, hog_scaler, hog_dim = train_final_model(
-        images, labels, method="hog", C=1.0, **hog_params
-    )
-    print(f"HOG feature dimension: {hog_dim}")
+        print("\n" + "=" * 50)
+        lbp_svm, lbp_scaler, lbp_dim = train_final_model(
+            images, labels, method="lbp", C=1.0, **lbp_params
+        )
+        print(f"LBP feature dimension: {lbp_dim}")
 
-    print("\n" + "=" * 50)
-    lbp_svm, lbp_scaler, lbp_dim = train_final_model(
-        images, labels, method="lbp", C=1.0, **lbp_params
-    )
-    print(f"LBP feature dimension: {lbp_dim}")
+        # Evaluate on dev set
+        hog_dev = predict_on_dev(hog_svm, hog_scaler, "hog", **hog_params)
+        lbp_dev = predict_on_dev(lbp_svm, lbp_scaler, "lbp", **lbp_params)
 
-    # Evaluate on dev set
-    hog_dev = predict_on_dev(hog_svm, hog_scaler, "hog", **hog_params)
-    lbp_dev = predict_on_dev(lbp_svm, lbp_scaler, "lbp", **lbp_params)
+        print("\n" + "=" * 50)
+        print("Final Results:")
+        print(
+            f"  HOG - Dev Accuracy: {hog_dev['accuracy']:.4f}, AUC: {hog_dev['auc']:.4f}"
+        )
+        print(
+            f"  LBP - Dev Accuracy: {lbp_dev['accuracy']:.4f}, AUC: {lbp_dev['auc']:.4f}"
+        )
+        print(f"\nResults saved to {PROJECT_ROOT / 'results'}")
+    elif mode == "eval":
+        # Train final models
+        print("\n" + "=" * 50)
+        hog_svm, hog_scaler, hog_dim = train_final_model(
+            images, labels, method="hog", C=1.0, **hog_params
+        )
+        print(f"HOG feature dimension: {hog_dim}")
 
-    print("\n" + "=" * 50)
-    print("Final Results:")
-    print(f"  HOG - Dev Accuracy: {hog_dev['accuracy']:.4f}, AUC: {hog_dev['auc']:.4f}")
-    print(f"  LBP - Dev Accuracy: {lbp_dev['accuracy']:.4f}, AUC: {lbp_dev['auc']:.4f}")
-    print(f"\nResults saved to {PROJECT_ROOT / 'results'}")
+        print("\n" + "=" * 50)
+        lbp_svm, lbp_scaler, lbp_dim = train_final_model(
+            images, labels, method="lbp", C=1.0, **lbp_params
+        )
+        print(f"LBP feature dimension: {lbp_dim}")
+
+        # Predict on eval set
+        # First compute threshold from dev set
+        hog_dev = predict_on_dev(hog_svm, hog_scaler, 'hog', **hog_params)
+        hog_threshold = hog_dev['optimal_threshold']
+
+        lbp_dev = predict_on_dev(lbp_svm, lbp_scaler, 'lbp', **lbp_params)
+        lbp_threshold = lbp_dev['optimal_threshold']
+
+        # Then use thresholds for eval
+        hog_eval = predict_on_eval(hog_svm, hog_scaler, hog_threshold, "hog", **hog_params)
+        lbp_eval = predict_on_eval(lbp_svm, lbp_scaler, lbp_threshold, "lbp", **lbp_params)
+
+        print("\n" + "=" * 50)
+        print("Final Results (Eval):")
+        print(
+            f"  HOG predictions saved to {PROJECT_ROOT / 'results' / 'image_hog_eval.txt'}"
+        )
+        print(
+            f"  LBP predictions saved to {PROJECT_ROOT / 'results' / 'image_lbp_eval.txt'}"
+        )
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="SVM-based image person detector with session-aware cross-validation"
+    )
+    parser.add_argument(
+        "--cv-strategy",
+        type=str,
+        choices=["kfold", "loso"],
+        default="kfold",
+        help="Cross-validation strategy to use (default: kfold)",
+    )
+    parser.add_argument(
+        "--n-splits",
+        type=int,
+        default=2,
+        help="Number of folds for kfold strategy (default: 2)",
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["train", "dev", "eval"],
+        default="train",
+        help="train: cross-validation, dev: train on all dev data and evaluate on dev, eval: train on dev and predict on eval",
+    )
+
+    args = parser.parse_args()
+    main(mode=args.mode, cv_strategy=args.cv_strategy, n_splits=args.n_splits)
