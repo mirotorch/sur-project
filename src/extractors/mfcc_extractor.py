@@ -256,7 +256,7 @@ def _get_audio_files(directory):
 
 
 if __name__ == "__main__":
-    base_dir = "/home/mirotorch/vut/sur/dataset"
+    base_dir = PROJECT_ROOT / "dataset"
     features, labels, fnames = load_audio_dataset(base_dir)
     print(f"\nDataset shape: {features.shape}")
     print(
