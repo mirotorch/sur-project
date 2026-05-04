@@ -1045,7 +1045,7 @@ if __name__ == "__main__":
         "--method",
         type=str,
         choices=["hog", "lbp", "combined"],
-        default="hog",
+        default="combined",
         help="Feature extraction method (default: hog). 'combined' concatenates HOG+LBP with PCA",
     )
     parser.add_argument(
