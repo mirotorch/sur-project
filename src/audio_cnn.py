@@ -1,6 +1,5 @@
 """
 CNN-based audio person detector using MFCC features.
-Implements shallow 2D CNN with ReLU, BatchNorm, and Dropout.
 """
 
 import os
@@ -14,14 +13,45 @@ from sklearn.metrics import accuracy_score, roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
 from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
-from session_cv import loso
+from session_cv import k_fold, loso
 from utils import compute_eer_threshold, save_predictions
 
 PROJECT_ROOT = Path(__file__).parent.parent
+CACHE_DIR = PROJECT_ROOT / "cache"
 
-if torch.cuda.is_available():
-    torch.backends.cudnn.benchmark = True
-    print("cuDNN benchmark enabled for GPU acceleration")
+
+def ensure_cache_dir():
+    """Create cache directory if it doesn't exist."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def get_threshold_cache_path(cv_strategy, n_splits):
+    """Generate cache file path for CV mean threshold."""
+    filename = f"threshold_cnn_{cv_strategy}_{n_splits}.npy"
+    return os.path.join(CACHE_DIR, filename)
+
+
+def save_cv_threshold(threshold, cv_strategy, n_splits):
+    """Save mean CV threshold to cache."""
+    ensure_cache_dir()
+    cache_path = get_threshold_cache_path(cv_strategy, n_splits)
+    np.save(cache_path, np.array([threshold]))
+    print(f"  Saved CV mean threshold to {cache_path}")
+
+
+def load_cv_threshold(cv_strategy, n_splits):
+    """
+    Load mean CV threshold from cache.
+
+    Returns:
+        Threshold value or None if not found
+    """
+    cache_path = get_threshold_cache_path(cv_strategy, n_splits)
+    if os.path.exists(cache_path):
+        threshold = np.load(cache_path)[0]
+        print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
+        return threshold
+    return None
 
 
 class AudioDataset(Dataset):
@@ -241,8 +271,8 @@ class CNNTrainer:
         return np.array(all_scores)
 
 
-def cross_validate_cnn(
-    features, labels, filenames, cv_strategy="kfold", n_splits=2, epochs=50
+def cross_validate(
+    features, labels, filenames, cv_strategy="loso", n_splits=2, epochs=50
 ):
     """
     Perform session-based cross-validation with CNN.
@@ -252,24 +282,14 @@ def cross_validate_cnn(
         labels: Labels array
         filenames: List of filenames
         cv_strategy: Cross-validation strategy to use
-            - "kfold": Session-Aware K-Fold (default, faster)
+            - "kfold": Session-Aware K-Fold (faster)
             - "loso": Leave-One-Session-Out (more comprehensive)
         n_splits: Number of folds (only used for kfold strategy)
         epochs: Training epochs per fold
 
     Returns:
         list of CV results (dict with fold info, metrics, and predictions)
-
-    Examples:
-        # Session-Aware K-Fold with 3 folds
-        results = cross_validate_cnn(features, labels, filenames,
-                                     cv_strategy="kfold", n_splits=3)
-
-        # Leave-One-Session-Out (exhaustive)
-        results = cross_validate_cnn(features, labels, filenames,
-                                     cv_strategy="loso")
     """
-    # Select CV strategy
     if cv_strategy.lower() == "kfold":
         cv_splits = k_fold(filenames, labels, n_splits)
     elif cv_strategy.lower() == "loso":
@@ -278,6 +298,7 @@ def cross_validate_cnn(
         raise ValueError(f"Unknown CV strategy: {cv_strategy}. Use 'kfold' or 'loso'")
 
     results = []
+    fold_thresholds = []
 
     print(
         f"\n=== CNN Cross-Validation ({cv_strategy.upper()}, "
@@ -318,11 +339,19 @@ def cross_validate_cnn(
         val_loss, val_auc = trainer.evaluate(val_loader)
         scores = trainer.predict(val_loader)
 
+        # Compute EER threshold for this fold
+        fold_threshold, fold_eer = compute_eer_threshold(y_val, scores)
+        fold_thresholds.append(fold_threshold)
+
+        fold_predictions = (scores > fold_threshold).astype(int)
+        fold_acc = accuracy_score(y_val, fold_predictions)
+
         results.append(
             {
                 "fold": fold,
                 "val_auc": val_auc,
                 "val_loss": val_loss,
+                "val_accuracy": fold_acc,
                 "scores": scores,
                 "model": model,
                 "train_idx": train_idx,
@@ -330,11 +359,20 @@ def cross_validate_cnn(
             }
         )
 
+        print(f"  Validation Accuracy: {fold_acc:.4f}")
         print(f"  Validation AUC: {val_auc:.4f}")
+        print(f"  Fold EER: {fold_eer:.4f}, Threshold: {fold_threshold:.4f}")
 
     aucs = [r["val_auc"] for r in results]
+    accs = [r["val_accuracy"] for r in results]
     print("\n=== Summary ===")
+    print(f"Mean Accuracy: {np.mean(accs):.4f} (+/- {np.std(accs):.4f})")
     print(f"Mean AUC: {np.mean(aucs):.4f} (+/- {np.std(aucs):.4f})")
+
+    if fold_thresholds:
+        mean_threshold = np.mean(fold_thresholds)
+        print(f"\nMean CV Threshold: {mean_threshold:.4f}")
+        save_cv_threshold(mean_threshold, cv_strategy, n_splits)
 
     return results
 
@@ -374,14 +412,16 @@ def train_final_model(features, labels, epochs=100):
     return model, trainer
 
 
-def predict_on_dev(model, trainer, base_dir=None):
+def predict_on_dev(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=2):
     """
-    Generate predictions on dev set and compute EER threshold.
+    Generate predictions on dev set using mean CV threshold and save results.
 
     Args:
         model: Trained CNN model
         trainer: CNNTrainer instance
         base_dir: Dataset base directory (default: PROJECT_ROOT / "dataset")
+        cv_strategy: CV strategy used (for loading threshold)
+        n_splits: Number of splits used (for loading threshold)
 
     Returns:
         dict with predictions and optimal threshold
@@ -424,9 +464,22 @@ def predict_on_dev(model, trainer, base_dir=None):
 
     scores = trainer.predict(loader)
 
-    # Compute EER threshold
-    optimal_threshold, eer = compute_eer_threshold(all_labels, scores)
-    print(f"  Dev EER: {eer:.4f}, Optimal Threshold: {optimal_threshold:.4f}")
+    # Use mean CV threshold if available, otherwise default to 0.5
+    optimal_threshold = load_cv_threshold(cv_strategy, n_splits)
+    threshold_source = "CV cache"
+
+    if optimal_threshold is None:
+        print("  No CV threshold found in cache, defaulting to 0.5")
+        optimal_threshold = 0.5
+        threshold_source = "default (0.5)"
+    else:
+        print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
+
+    dev_eer, _ = compute_eer_threshold(all_labels, scores)
+
+    print(
+        f"  Dev EER: {dev_eer:.4f}, Using Threshold: {optimal_threshold:.4f} (from {threshold_source})"
+    )
 
     auc = roc_auc_score(all_labels, scores)
     predictions = (scores > optimal_threshold).astype(int)
@@ -447,7 +500,7 @@ def predict_on_dev(model, trainer, base_dir=None):
         "accuracy": acc,
         "auc": auc,
         "optimal_threshold": optimal_threshold,
-        "eer": eer,
+        "eer": dev_eer,
     }
 
 
@@ -460,15 +513,16 @@ def _get_audio_files(directory):
     return paths, fnames
 
 
-def predict_on_eval(model, trainer, optimal_threshold, base_dir=None):
+def predict_on_eval(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=2):
     """
-    Evaluate on eval set using EER threshold from dev.
+    Evaluate on eval set using mean CV threshold.
 
     Args:
         model: Trained CNN model
         trainer: CNNTrainer instance
-        optimal_threshold: Threshold computed from dev set
         base_dir: Dataset base directory (default: PROJECT_ROOT / "dataset")
+        cv_strategy: CV strategy used (for loading threshold)
+        n_splits: Number of splits used (for loading threshold)
 
     Returns:
         dict with predictions
@@ -482,8 +536,16 @@ def predict_on_eval(model, trainer, optimal_threshold, base_dir=None):
 
     extractor = MFCCExtractor()
 
-    # Use the threshold passed from dev set
-    print(f"  Using threshold from dev set: {optimal_threshold:.4f}")
+    # Use mean CV threshold if available, otherwise default to 0.5
+    optimal_threshold = load_cv_threshold(cv_strategy, n_splits)
+    threshold_source = "CV cache"
+
+    if optimal_threshold is None:
+        print("  No CV threshold found in cache, defaulting to 0.5")
+        optimal_threshold = 0.5
+        threshold_source = "default (0.5)"
+    else:
+        print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
 
     # Predict on eval set
     eval_dir = base_dir / "eval"
@@ -533,6 +595,10 @@ def main(mode="train", cv_strategy="kfold", n_splits=2):
         cv_strategy: Cross-validation strategy ("kfold" or "loso")
         n_splits: Number of folds for kfold strategy
     """
+    if torch.cuda.is_available():
+        torch.backends.cudnn.benchmark = True
+        print("cuDNN benchmark enabled for GPU acceleration")
+
     base_dir = str(PROJECT_ROOT / "dataset")
 
     print("Loading audio dataset with MFCC features...")
@@ -545,7 +611,7 @@ def main(mode="train", cv_strategy="kfold", n_splits=2):
     print(f"Feature shape: {features.shape}")
 
     if mode == "train":
-        cnn_results = cross_validate_cnn(
+        cnn_results = cross_validate(
             features,
             labels,
             filenames,
@@ -558,7 +624,9 @@ def main(mode="train", cv_strategy="kfold", n_splits=2):
         print("\n" + "=" * 50)
         model, trainer = train_final_model(features, labels, epochs=20)
 
-        dev_results = predict_on_dev(model, trainer, base_dir)
+        dev_results = predict_on_dev(
+            model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
+        )
 
         print("\n" + "=" * 50)
         print("Final Results:")
@@ -570,10 +638,12 @@ def main(mode="train", cv_strategy="kfold", n_splits=2):
         print("\n" + "=" * 50)
         model, trainer = train_final_model(features, labels, epochs=20)
 
-        dev_results = predict_on_dev(model, trainer, base_dir)
+        dev_results = predict_on_dev(
+            model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
+        )
 
         eval_results = predict_on_eval(
-            model, trainer, dev_results["optimal_threshold"], base_dir
+            model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
         )
 
         print("\n" + "=" * 50)
@@ -592,7 +662,7 @@ if __name__ == "__main__":
         type=str,
         choices=["kfold", "loso"],
         default="kfold",
-        help="Cross-validation strategy to use (default: kfold)",
+        help="Cross-validation strategy to use (default: loso)",
     )
     parser.add_argument(
         "--n-splits",

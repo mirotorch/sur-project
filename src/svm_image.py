@@ -1,6 +1,5 @@
 """
 Image-based person detector using HOG and LBP features with SVM.
-Implements session-based cross-validation and generates prediction files.
 Supports combined HOG+LBP features with PCA dimensionality reduction.
 """
 
@@ -17,7 +16,8 @@ from sklearn.svm import LinearSVC
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from session_cv import k_fold, loso
-from utils import compute_eer_threshold, load_dataset, load_images, save_predictions
+from utils import (compute_eer_threshold, load_dataset, load_images,
+                   save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
