@@ -5,12 +5,12 @@ Image: HOG/LBP/combined -> PCA -> MLP -> 64-dim.
 Fusion: 128-dim (concat) -> classifier -> output.
 """
 
-import os
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -21,64 +21,29 @@ from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from extractors.mfcc_extractor import load_audio_dataset
 from session_cv import k_fold, loso
-from utils import compute_eer_threshold, load_dataset, save_predictions
+from utils import (compute_dataset_hash, compute_eer_threshold, load_cv_threshold,
+                   load_model_cache, save_cv_threshold, save_model_cache,
+                   save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
 
 
-def ensure_cache_dir():
-    """Create cache directory if it doesn't exist."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def get_cache_path(method, params_str, dataset_hash):
+def get_feature_cache_path(method, params_str, dataset_hash):
     """Generate cache file path for features."""
     filename = f"fusion_{method}_{params_str}_{dataset_hash}.npy"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def get_threshold_cache_path(method, cv_strategy, n_splits, n_components):
-    """Generate cache file path for CV mean threshold."""
-    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
-    filename = f"threshold_fusion_{method}_{cv_strategy}_{n_splits}_{n_comp_str}.npy"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def save_cv_threshold(threshold, method, cv_strategy, n_splits, n_components):
-    """Save mean CV threshold to cache."""
-    ensure_cache_dir()
-    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
-    np.save(cache_path, np.array([threshold]))
-    print(f"  Saved CV mean threshold to {cache_path}")
-
-
-def load_cv_threshold(method, cv_strategy, n_splits, n_components):
-    """Load mean CV threshold from cache."""
-    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
-    if os.path.exists(cache_path):
-        threshold = np.load(cache_path)[0]
-        print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
-        return threshold
-    return None
-
-
-def compute_dataset_hash(images):
-    """Compute simple hash of dataset for cache invalidation."""
-    return f"{len(images)}_{images.shape[1]}_{images.shape[2]}"
+    return str(CACHE_DIR / filename)
 
 
 def extract_image_features_cached(images, method="hog", use_cache=True, **kwargs):
     """
     Extract image features with caching support.
     """
-    ensure_cache_dir()
-
     params_str = "_".join(f"{k}{v}" for k, v in sorted(kwargs.items()))
     dataset_hash = compute_dataset_hash(images)
-    cache_path = get_cache_path(method, params_str, dataset_hash)
+    cache_path = get_feature_cache_path(method, params_str, dataset_hash)
 
-    if use_cache and os.path.exists(cache_path):
+    if use_cache and Path(cache_path).exists():
         print(f"Loading cached {method} features from {cache_path}")
         return np.load(cache_path)
 
@@ -106,42 +71,6 @@ def extract_image_features_cached(images, method="hog", use_cache=True, **kwargs
         print(f"  Cached to {cache_path}")
 
     return features
-
-
-def get_model_cache_path(model_type, cv_strategy=None, n_splits=None, fold=None):
-    """Generate cache file path for models."""
-    if cv_strategy and n_splits:
-        if fold is not None:
-            filename = (
-                f"model_fusion_{model_type}_fold{fold}_{cv_strategy}_{n_splits}.joblib"
-            )
-        else:
-            filename = f"model_fusion_{model_type}_{cv_strategy}_{n_splits}.joblib"
-    else:
-        filename = f"model_fusion_{model_type}_dev.joblib"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def save_model_cache(model, model_type, cv_strategy=None, n_splits=None, fold=None):
-    """Save model to cache."""
-    ensure_cache_dir()
-    cache_path = get_model_cache_path(model_type, cv_strategy, n_splits, fold)
-    import joblib
-
-    joblib.dump(model, cache_path)
-    print(f"  Saved {model_type} to {cache_path}")
-
-
-def load_model_cache(model_type, cv_strategy=None, n_splits=None, fold=None):
-    """Load model from cache."""
-    cache_path = get_model_cache_path(model_type, cv_strategy, n_splits, fold)
-    if os.path.exists(cache_path):
-        import joblib
-
-        model = joblib.load(cache_path)
-        print(f"  Loaded {model_type} from {cache_path}")
-        return model
-    return None
 
 
 class FusionDataset(Dataset):
@@ -329,7 +258,8 @@ def prepare_data(base_dir, method="hog", n_components=None, use_cache=True):
     print(f"Audio: {len(audio_features)} samples, shape={audio_features.shape}")
 
     # Load image data
-    images, img_labels, img_filenames = load_dataset(base_dir, use_augmented=True)
+    from utils import load_dataset
+    images, _, img_filenames = load_dataset(base_dir, use_augmented=True)
     print(f"Images: {len(images)} samples")
 
     # Extract image features
@@ -468,7 +398,7 @@ def cross_validate(
         fold_thresholds.append(fold_threshold)
 
         # Save fold model to cache
-        save_model_cache(model.state_dict(), "model", cv_strategy, n_splits, fold)
+        save_model_cache(model.state_dict(), "fusion", "model", cv_strategy, n_splits, n_components, fold)
 
         results.append(
             {
@@ -493,7 +423,7 @@ def cross_validate(
     if fold_thresholds:
         mean_threshold = np.mean(fold_thresholds)
         print(f"\nMean CV Threshold: {mean_threshold:.4f}")
-        save_cv_threshold(mean_threshold, method, cv_strategy, n_splits, n_components)
+        save_cv_threshold(mean_threshold, "fusion", cv_strategy, n_splits, n_components)
 
     return results
 
@@ -537,14 +467,12 @@ def train_final_model(
     history = trainer.train(loader, dummy_loader, epochs=epochs)
 
     # Save model to cache
-    save_model_cache(model.state_dict(), "model")
+    save_model_cache(model.state_dict(), "fusion", "model")
 
     return model, trainer
 
 
-def prepare_eval_data(
-    base_dir, method="hog", n_components=None, scaler=None, pca=None, use_cache=True
-):
+def prepare_eval_data(base_dir, method="hog", n_components=None, scaler=None, pca=None, use_cache=True):
     """Prepare eval data for fusion prediction."""
     print("Loading eval dataset...")
 
@@ -552,15 +480,12 @@ def prepare_eval_data(
 
     # Load eval audio
     eval_audio_dir = base_dir / "eval"
-    audio_features, _, eval_filenames = load_audio_dataset(
-        str(eval_audio_dir), use_augmented=False
-    )
+    audio_features, _, eval_filenames = load_audio_dataset(str(eval_audio_dir), use_augmented=False)
     print(f"Eval Audio: {len(audio_features)} samples")
 
     # Load eval images
-    eval_images, _, img_filenames = load_dataset(
-        str(eval_audio_dir), use_augmented=False
-    )
+    from utils import load_dataset
+    eval_images, _, img_filenames = load_dataset(str(eval_audio_dir), use_augmented=False)
     print(f"Eval Images: {len(eval_images)} samples")
 
     # Extract image features
@@ -615,15 +540,7 @@ def prepare_eval_data(
     }
 
 
-def predict_on_dev(
-    model,
-    trainer,
-    base_dir=None,
-    method="hog",
-    n_components=None,
-    cv_strategy="kfold",
-    n_splits=2,
-):
+def predict_on_dev(model, trainer, base_dir=None, method="hog", n_components=None, cv_strategy="kfold", n_splits=2):
     """Generate predictions on dev set using CV threshold."""
     if base_dir is None:
         base_dir = PROJECT_ROOT / "dataset"
@@ -632,9 +549,7 @@ def predict_on_dev(
 
     data = prepare_data(base_dir, method, n_components, use_cache=True)
 
-    dataset = FusionDataset(
-        data["audio_features"], data["image_features"], data["labels"]
-    )
+    dataset = FusionDataset(data["audio_features"], data["image_features"], data["labels"])
     use_cuda = torch.cuda.is_available()
     loader = DataLoader(
         dataset,
@@ -647,7 +562,7 @@ def predict_on_dev(
     scores = trainer.predict(loader)
 
     # Use CV threshold if available, otherwise default to 0.5
-    optimal_threshold = load_cv_threshold(method, cv_strategy, n_splits, n_components)
+    optimal_threshold = load_cv_threshold("fusion", cv_strategy, n_splits, n_components)
     threshold_source = "CV cache"
 
     if optimal_threshold is None:
@@ -671,11 +586,9 @@ def predict_on_dev(
     print(f"  Dev AUC: {auc:.4f}")
 
     output_dir = PROJECT_ROOT / "results"
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
     output_file = output_dir / "fusion.txt"
-    save_predictions(
-        str(output_file), data["filenames"], scores, threshold=optimal_threshold
-    )
+    save_predictions(str(output_file), data["filenames"], scores, threshold=optimal_threshold)
 
     return {
         "filenames": data["filenames"],
@@ -688,17 +601,7 @@ def predict_on_dev(
     }
 
 
-def predict_on_eval(
-    model,
-    trainer,
-    base_dir=None,
-    method="hog",
-    n_components=None,
-    scaler=None,
-    pca=None,
-    cv_strategy="kfold",
-    n_splits=2,
-):
+def predict_on_eval(model, trainer, base_dir=None, method="hog", n_components=None, scaler=None, pca=None, cv_strategy="kfold", n_splits=2):
     """Evaluate on eval set using dev-trained model and CV threshold."""
     if base_dir is None:
         base_dir = PROJECT_ROOT / "dataset"
@@ -706,7 +609,7 @@ def predict_on_eval(
     print("\nEvaluating on eval set...")
 
     # Use CV threshold if available, otherwise default to 0.5
-    optimal_threshold = load_cv_threshold(method, cv_strategy, n_splits, n_components)
+    optimal_threshold = load_cv_threshold("fusion", cv_strategy, n_splits, n_components)
     threshold_source = "CV cache"
 
     if optimal_threshold is None:
@@ -716,14 +619,11 @@ def predict_on_eval(
     else:
         print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
 
-    eval_data = prepare_eval_data(
-        base_dir, method, n_components, scaler, pca, use_cache=True
-    )
+    # Load eval data
+    eval_data = prepare_eval_data(base_dir, method, n_components, scaler, pca, use_cache=True)
 
     eval_dataset = FusionDataset(
-        eval_data["audio_features"],
-        eval_data["image_features"],
-        [0] * len(eval_data["filenames"]),
+        eval_data["audio_features"], eval_data["image_features"], [0] * len(eval_data["filenames"])
     )
     use_cuda = torch.cuda.is_available()
     eval_loader = DataLoader(
@@ -738,11 +638,9 @@ def predict_on_eval(
     predictions = (scores > optimal_threshold).astype(int)
 
     output_dir = PROJECT_ROOT / "results"
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
     output_file = output_dir / "fusion_eval.txt"
-    save_predictions(
-        str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold
-    )
+    save_predictions(str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold)
 
     print(f"  Eval predictions saved to {output_file}")
 
@@ -770,12 +668,12 @@ def predict_on_eval_cv(
     """Evaluate on eval set using ensemble of CV-trained fusion models."""
     base_dir = PROJECT_ROOT / "dataset"
 
-    print("\nEvaluating on eval set with Fusion (CV Ensemble)...")
+    print(f"\nEvaluating on eval set with Fusion (CV Ensemble)...")
 
     # Load CV models from cache
     cv_models = []
     for fold in range(n_splits if cv_strategy == "kfold" else 10):
-        model_state = load_model_cache("model", cv_strategy, n_splits, fold)
+        model_state = load_model_cache("fusion", "model", cv_strategy, n_splits, n_components, fold)
         if model_state is not None:
             audio_cnn = ShallowCNN(
                 n_channels=audio_features.shape[1],
@@ -797,20 +695,16 @@ def predict_on_eval_cv(
     print(f"  Loaded {len(cv_models)} CV models")
 
     # Use CV threshold
-    optimal_threshold = load_cv_threshold(method, cv_strategy, n_splits, n_components)
+    optimal_threshold = load_cv_threshold("fusion", cv_strategy, n_splits, n_components)
     if optimal_threshold is None:
         print("  No CV threshold found in cache, defaulting to 0.5")
         optimal_threshold = 0.5
 
     # Load eval data
-    eval_data = prepare_eval_data(
-        base_dir, method, n_components, scaler, pca, use_cache=True
-    )
+    eval_data = prepare_eval_data(base_dir, method, n_components, scaler, pca, use_cache=True)
 
     eval_dataset = FusionDataset(
-        eval_data["audio_features"],
-        eval_data["image_features"],
-        [0] * len(eval_data["filenames"]),
+        eval_data["audio_features"], eval_data["image_features"], [0] * len(eval_data["filenames"])
     )
     use_cuda = torch.cuda.is_available()
     eval_loader = DataLoader(
@@ -833,12 +727,10 @@ def predict_on_eval_cv(
     predictions = (scores > optimal_threshold).astype(int)
 
     output_dir = PROJECT_ROOT / "results"
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
 
     output_file = output_dir / "fusion_eval_cv.txt"
-    save_predictions(
-        str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold
-    )
+    save_predictions(str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold)
 
     print(f"  Eval-CV predictions saved to {output_file}")
 
@@ -892,13 +784,8 @@ def main(
         )
 
         dev_results = predict_on_dev(
-            model,
-            trainer,
-            base_dir,
-            method=method,
-            n_components=n_components,
-            cv_strategy=cv_strategy,
-            n_splits=n_splits,
+            model, trainer, base_dir, method=method, n_components=n_components,
+            cv_strategy=cv_strategy, n_splits=n_splits
         )
 
         print("\n" + "=" * 50)
@@ -910,7 +797,7 @@ def main(
     elif mode == "eval-dev":
         print("\n" + "=" * 50)
         # Try to load dev-trained model from cache
-        model_state = load_model_cache("model")
+        model_state = load_model_cache("fusion", "model")
         if model_state is not None:
             data = prepare_data(base_dir, method, n_components)
             audio_cnn = ShallowCNN(
@@ -934,25 +821,14 @@ def main(
             )
 
         dev_results = predict_on_dev(
-            model,
-            trainer,
-            base_dir,
-            method=method,
-            n_components=n_components,
-            cv_strategy=cv_strategy,
-            n_splits=n_splits,
+            model, trainer, base_dir, method=method, n_components=n_components,
+            cv_strategy=cv_strategy, n_splits=n_splits
         )
 
         eval_results = predict_on_eval(
-            model,
-            trainer,
-            base_dir,
-            method=method,
-            n_components=n_components,
-            scaler=data["scaler"],
-            pca=data["pca"],
-            cv_strategy=cv_strategy,
-            n_splits=n_splits,
+            model, trainer, base_dir, method=method, n_components=n_components,
+            scaler=data["scaler"], pca=data["pca"],
+            cv_strategy=cv_strategy, n_splits=n_splits
         )
 
         print("\n" + "=" * 50)

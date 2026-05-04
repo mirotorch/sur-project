@@ -4,11 +4,93 @@ Utility functions for SUR project 2025/2026.
 Data loading, session parsing, and prediction utilities.
 """
 
+import os
+import joblib
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 from sklearn.metrics import roc_curve
+
+PROJECT_ROOT = Path(__file__).parent.parent
+CACHE_DIR = PROJECT_ROOT / "cache"
+
+
+def ensure_cache_dir():
+    """Create cache directory if it doesn't exist."""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def get_threshold_cache_path(method, cv_strategy, n_splits, n_components=None):
+    """Generate cache file path for CV mean threshold."""
+    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
+    filename = f"threshold_{method}_{cv_strategy}_{n_splits}_{n_comp_str}.npy"
+    return os.path.join(CACHE_DIR, filename)
+
+
+def save_cv_threshold(threshold, method, cv_strategy, n_splits, n_components=None):
+    """Save mean CV threshold to cache."""
+    ensure_cache_dir()
+    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
+    np.save(cache_path, np.array([threshold]))
+    print(f"  Saved CV mean threshold to {cache_path}")
+
+
+def load_cv_threshold(method, cv_strategy, n_splits, n_components=None):
+    """
+    Load mean CV threshold from cache.
+
+    Returns:
+        Threshold value or None if not found
+    """
+    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
+    if os.path.exists(cache_path):
+        threshold = np.load(cache_path)[0]
+        print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
+        return threshold
+    return None
+
+
+def get_model_cache_path(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+    """Generate cache file path for models."""
+    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
+    if cv_strategy and n_splits:
+        if fold is not None:
+            filename = f"model_{method}_{model_type}_fold{fold}_{cv_strategy}_{n_splits}_{n_comp_str}.joblib"
+        else:
+            filename = f"model_{method}_{model_type}_{cv_strategy}_{n_splits}_{n_comp_str}.joblib"
+    else:
+        filename = f"model_{method}_{model_type}_dev_{n_comp_str}.joblib"
+    return os.path.join(CACHE_DIR, filename)
+
+
+def save_model_cache(model, method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+    """Save model to cache."""
+    ensure_cache_dir()
+    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
+    joblib.dump(model, cache_path)
+    print(f"  Saved {model_type} to {cache_path}")
+
+
+def load_model_cache(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+    """Load model from cache."""
+    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
+    if os.path.exists(cache_path):
+        model = joblib.load(cache_path)
+        print(f"  Loaded {model_type} from {cache_path}")
+        return model
+    return None
+
+
+def compute_dataset_hash(images):
+    """Compute simple hash of dataset for cache invalidation."""
+    return f"{len(images)}_{images.shape[1]}_{images.shape[2]}"
+
+
+def get_feature_cache_path(method, params_str, dataset_hash):
+    """Generate cache file path for features."""
+    filename = f"{method}_{params_str}_{dataset_hash}.npy"
+    return os.path.join(CACHE_DIR, filename)
 
 
 def parse_filename(filename):

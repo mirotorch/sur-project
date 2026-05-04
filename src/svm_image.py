@@ -3,12 +3,10 @@ Image-based person detector using HOG and LBP features with SVM.
 Supports combined HOG+LBP features with PCA dimensionality reduction.
 """
 
-import os
 import time
 from pathlib import Path
 
 import numpy as np
-import joblib
 from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -17,88 +15,11 @@ from sklearn.svm import LinearSVC
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from session_cv import k_fold, loso
-from utils import (compute_eer_threshold, load_dataset, load_images,
-                   save_predictions)
+from utils import (compute_dataset_hash, compute_eer_threshold, load_cv_threshold,
+                   load_dataset, load_images, load_model_cache,
+                   save_cv_threshold, save_model_cache, save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
-CACHE_DIR = PROJECT_ROOT / "cache"
-
-
-def ensure_cache_dir():
-    """Create cache directory if it doesn't exist."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def get_cache_path(method, params_str, dataset_hash):
-    """Generate cache file path for features."""
-    filename = f"{method}_{params_str}_{dataset_hash}.npy"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def get_threshold_cache_path(method, cv_strategy, n_splits, n_components):
-    """Generate cache file path for CV mean threshold."""
-    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
-    filename = f"threshold_{method}_{cv_strategy}_{n_splits}_{n_comp_str}.npy"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def save_cv_threshold(threshold, method, cv_strategy, n_splits, n_components):
-    """Save mean CV threshold to cache."""
-    ensure_cache_dir()
-    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
-    np.save(cache_path, np.array([threshold]))
-    print(f"  Saved CV mean threshold to {cache_path}")
-
-
-def load_cv_threshold(method, cv_strategy, n_splits, n_components):
-    """
-    Load mean CV threshold from cache.
-
-    Returns:
-        Threshold value or None if not found
-    """
-    cache_path = get_threshold_cache_path(method, cv_strategy, n_splits, n_components)
-    if os.path.exists(cache_path):
-        threshold = np.load(cache_path)[0]
-        print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
-        return threshold
-    return None
-
-
-def get_model_cache_path(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
-    """Generate cache file path for models."""
-    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
-    if cv_strategy and n_splits:
-        if fold is not None:
-            filename = f"model_{method}_{model_type}_fold{fold}_{cv_strategy}_{n_splits}_{n_comp_str}.joblib"
-        else:
-            filename = f"model_{method}_{model_type}_{cv_strategy}_{n_splits}_{n_comp_str}.joblib"
-    else:
-        filename = f"model_{method}_{model_type}_dev_{n_comp_str}.joblib"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def save_model_cache(model, method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
-    """Save model to cache."""
-    ensure_cache_dir()
-    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
-    joblib.dump(model, cache_path)
-    print(f"  Saved {model_type} to {cache_path}")
-
-
-def load_model_cache(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
-    """Load model from cache."""
-    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
-    if os.path.exists(cache_path):
-        model = joblib.load(cache_path)
-        print(f"  Loaded {model_type} from {cache_path}")
-        return model
-    return None
-
-
-def compute_dataset_hash(images):
-    """Compute simple hash of dataset for cache invalidation."""
-    return f"{len(images)}_{images.shape[1]}_{images.shape[2]}"
 
 
 def extract_features_cached(images, method="hog", use_cache=True, **kwargs):
@@ -114,13 +35,13 @@ def extract_features_cached(images, method="hog", use_cache=True, **kwargs):
     Returns:
         Feature matrix
     """
-    ensure_cache_dir()
+    from utils import get_feature_cache_path
 
     params_str = "_".join(f"{k}{v}" for k, v in sorted(kwargs.items()))
     dataset_hash = compute_dataset_hash(images)
-    cache_path = get_cache_path(method, params_str, dataset_hash)
+    cache_path = get_feature_cache_path(method, params_str, dataset_hash)
 
-    if use_cache and os.path.exists(cache_path):
+    if use_cache and Path(cache_path).exists():
         print(f"Loading cached {method} features from {cache_path}")
         return np.load(cache_path)
 
@@ -477,9 +398,9 @@ def predict_on_dev(
 
     print(f"\nEvaluating on dev set with {method.upper()}...")
 
-    dev_images, dev_filenames = load_images(os.path.join(base_dir, "target"))
+    dev_images, dev_filenames = load_images(str(base_dir / "target"))
     non_target_dev, non_target_fnames = load_images(
-        os.path.join(base_dir, "non-target")
+        str(base_dir / "non-target")
     )
 
     dev_all = np.concatenate([dev_images, non_target_dev])
@@ -524,11 +445,11 @@ def predict_on_dev(
     print(f"  Dev AUC: {result['auc']:.4f}")
 
     output_dir = PROJECT_ROOT / "results"
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
 
-    output_file = os.path.join(output_dir, f"image_{method}.txt")
+    output_file = output_dir / f"image_{method}.txt"
     save_predictions(
-        output_file,
+        str(output_file),
         dev_fnames_all,
         result["calibrated_scores"],
         threshold=optimal_threshold,
@@ -580,8 +501,8 @@ def predict_on_eval(
 
     print(f"\nEvaluating on eval set with {method.upper()}...")
 
-    eval_dir = os.path.join(base_dir, "eval")
-    if not os.path.exists(eval_dir):
+    eval_dir = base_dir / "eval"
+    if not eval_dir.exists():
         print("Eval directory not found. Skipping eval.")
         return None
 
@@ -596,7 +517,7 @@ def predict_on_eval(
     else:
         print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
 
-    eval_images, eval_filenames = load_images(eval_dir)
+    eval_images, eval_filenames = load_images(str(eval_dir))
 
     if method == "combined":
         eval_features = extract_combined_features_cached(
@@ -628,11 +549,11 @@ def predict_on_eval(
     predictions = (eval_calibrated > optimal_threshold).astype(int)
 
     output_dir = PROJECT_ROOT / "results"
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
 
-    output_file = os.path.join(output_dir, f"image_{method}_eval.txt")
+    output_file = output_dir / f"image_{method}_eval.txt"
     save_predictions(
-        output_file, eval_filenames, eval_calibrated, threshold=optimal_threshold
+        str(output_file), eval_filenames, eval_calibrated, threshold=optimal_threshold
     )
 
     print(f"  Eval predictions saved to {output_file}")
@@ -694,12 +615,12 @@ def predict_on_eval_cv(
         print("  No CV threshold found in cache, defaulting to 0.5")
         optimal_threshold = 0.5
 
-    eval_dir = os.path.join(base_dir, "eval")
-    if not os.path.exists(eval_dir):
+    eval_dir = base_dir / "eval"
+    if not eval_dir.exists():
         print("Eval directory not found. Skipping eval.")
         return None
 
-    eval_images, eval_filenames = load_images(eval_dir)
+    eval_images, eval_filenames = load_images(str(eval_dir))
 
     if method == "combined":
         eval_features = extract_combined_features_cached(
@@ -741,11 +662,11 @@ def predict_on_eval_cv(
     predictions = (eval_calibrated > optimal_threshold).astype(int)
 
     output_dir = PROJECT_ROOT / "results"
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir.mkdir(exist_ok=True)
 
-    output_file = os.path.join(output_dir, f"image_{method}_eval_cv.txt")
+    output_file = output_dir / f"image_{method}_eval_cv.txt"
     save_predictions(
-        output_file, eval_filenames, eval_calibrated, threshold=optimal_threshold
+        str(output_file), eval_filenames, eval_calibrated, threshold=optimal_threshold
     )
 
     print(f"  Eval-CV predictions saved to {output_file}")
@@ -1106,7 +1027,7 @@ if __name__ == "__main__":
         type=str,
         choices=["train", "dev", "eval-dev", "eval-cv"],
         default="train",
-        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models for eval",
+        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models",
     )
     parser.add_argument(
         "--method",

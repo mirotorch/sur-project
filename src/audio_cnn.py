@@ -2,10 +2,8 @@
 CNN-based audio person detector using MFCC features.
 """
 
-import os
 from pathlib import Path
 
-import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -16,76 +14,10 @@ from torch.utils.data import DataLoader, Dataset
 from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
 from session_cv import k_fold, loso
 from spec_augment import SpecAugment
-from utils import compute_eer_threshold, save_predictions
+from utils import (compute_eer_threshold, load_cv_threshold, load_model_cache,
+                   save_cv_threshold, save_model_cache, save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
-CACHE_DIR = PROJECT_ROOT / "cache"
-
-
-def ensure_cache_dir():
-    """Create cache directory if it doesn't exist."""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-
-
-def get_threshold_cache_path(cv_strategy, n_splits):
-    """Generate cache file path for CV mean threshold."""
-    filename = f"threshold_cnn_{cv_strategy}_{n_splits}.npy"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def save_cv_threshold(threshold, cv_strategy, n_splits):
-    """Save mean CV threshold to cache."""
-    ensure_cache_dir()
-    cache_path = get_threshold_cache_path(cv_strategy, n_splits)
-    np.save(cache_path, np.array([threshold]))
-    print(f"  Saved CV mean threshold to {cache_path}")
-
-
-def load_cv_threshold(cv_strategy, n_splits):
-    """
-    Load mean CV threshold from cache.
-
-    Returns:
-        Threshold value or None if not found
-    """
-    cache_path = get_threshold_cache_path(cv_strategy, n_splits)
-    if os.path.exists(cache_path):
-        threshold = np.load(cache_path)[0]
-        print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
-        return threshold
-    return None
-
-
-def get_model_cache_path(model_type, cv_strategy=None, n_splits=None, fold=None):
-    """Generate cache file path for models."""
-    if cv_strategy and n_splits:
-        if fold is not None:
-            filename = (
-                f"model_cnn_{model_type}_fold{fold}_{cv_strategy}_{n_splits}.joblib"
-            )
-        else:
-            filename = f"model_cnn_{model_type}_{cv_strategy}_{n_splits}.joblib"
-    else:
-        filename = f"model_cnn_{model_type}_dev.joblib"
-    return os.path.join(CACHE_DIR, filename)
-
-
-def save_model_cache(model, model_type, cv_strategy=None, n_splits=None, fold=None):
-    """Save model to cache."""
-    ensure_cache_dir()
-    cache_path = get_model_cache_path(model_type, cv_strategy, n_splits, fold)
-    joblib.dump(model, cache_path)
-    print(f"  Saved {model_type} to {cache_path}")
-
-
-def load_model_cache(model_type, cv_strategy=None, n_splits=None, fold=None):
-    """Load model from cache."""
-    cache_path = get_model_cache_path(model_type, cv_strategy, n_splits, fold)
-    if os.path.exists(cache_path):
-        model = joblib.load(cache_path)
-        print(f"  Loaded {model_type} from {cache_path}")
-        return model
-    return None
 
 
 class AudioDataset(Dataset):
@@ -400,7 +332,7 @@ def cross_validate(
         fold_acc = accuracy_score(y_val, fold_predictions)
 
         # Save fold model to cache
-        save_model_cache(model.state_dict(), "audio", cv_strategy, n_splits, fold=fold)
+        save_model_cache(model.state_dict(), "cnn", "model", cv_strategy, n_splits, fold=fold)
 
         results.append(
             {
@@ -428,7 +360,7 @@ def cross_validate(
     if fold_thresholds:
         mean_threshold = np.mean(fold_thresholds)
         print(f"\nMean CV Threshold: {mean_threshold:.4f}")
-        save_cv_threshold(mean_threshold, cv_strategy, n_splits)
+        save_cv_threshold(mean_threshold, "cnn", cv_strategy, n_splits)
 
     return results
 
@@ -467,9 +399,18 @@ def train_final_model(features, labels, epochs=100, spec_augment=None):
     history = trainer.train(loader, dummy_loader, epochs=epochs)
 
     # Save model to cache
-    save_model_cache(model.state_dict(), "audio")
+    save_model_cache(model.state_dict(), "cnn", "model")
 
     return model, trainer
+
+
+def _get_audio_files(directory):
+    """Get all WAV files in directory with their filenames."""
+    directory = Path(directory)
+    files = sorted(directory.glob("*.wav"))
+    paths = [str(f) for f in files]
+    fnames = [f.stem for f in files]
+    return paths, fnames
 
 
 def predict_on_dev(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=2):
@@ -525,7 +466,7 @@ def predict_on_dev(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=
     scores = trainer.predict(loader)
 
     # Use mean CV threshold if available, otherwise default to 0.5
-    optimal_threshold = load_cv_threshold(cv_strategy, n_splits)
+    optimal_threshold = load_cv_threshold("cnn", cv_strategy, n_splits)
     threshold_source = "CV cache"
 
     if optimal_threshold is None:
@@ -564,15 +505,6 @@ def predict_on_dev(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=
     }
 
 
-def _get_audio_files(directory):
-    """Get all WAV files in directory with their filenames."""
-    directory = Path(directory)
-    files = sorted(directory.glob("*.wav"))
-    paths = [str(f) for f in files]
-    fnames = [f.stem for f in files]
-    return paths, fnames
-
-
 def predict_on_eval(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=2):
     """
     Evaluate on eval set using mean CV threshold.
@@ -597,7 +529,7 @@ def predict_on_eval(model, trainer, base_dir=None, cv_strategy="kfold", n_splits
     extractor = MFCCExtractor()
 
     # Use mean CV threshold if available, otherwise default to 0.5
-    optimal_threshold = load_cv_threshold(cv_strategy, n_splits)
+    optimal_threshold = load_cv_threshold("cnn", cv_strategy, n_splits)
     threshold_source = "CV cache"
 
     if optimal_threshold is None:
@@ -659,12 +591,12 @@ def predict_on_eval_cv(
     """
     base_dir = PROJECT_ROOT / "dataset"
 
-    print("\nEvaluating on eval set with CNN (CV Ensemble)...")
+    print(f"\nEvaluating on eval set with CNN (CV Ensemble)...")
 
     # Load CV models from cache
     cv_models = []
     for fold in range(n_splits if cv_strategy == "kfold" else 10):
-        model_state = load_model_cache("audio", cv_strategy, n_splits, fold)
+        model_state = load_model_cache("cnn", "model", cv_strategy, n_splits, fold)
         if model_state is not None:
             model = ShallowCNN(n_channels=features.shape[1], n_mfcc=features.shape[2])
             model.load_state_dict(model_state)
@@ -679,7 +611,7 @@ def predict_on_eval_cv(
     print(f"  Loaded {len(cv_models)} CV models")
 
     # Use mean CV threshold
-    optimal_threshold = load_cv_threshold(cv_strategy, n_splits)
+    optimal_threshold = load_cv_threshold("cnn", cv_strategy, n_splits)
     if optimal_threshold is None:
         print("  No CV threshold found in cache, defaulting to 0.5")
         optimal_threshold = 0.5
@@ -786,7 +718,7 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
     elif mode == "eval-dev":
         print("\n" + "=" * 50)
         # Try to load dev-trained model from cache
-        model_state = load_model_cache("audio")
+        model_state = load_model_cache("cnn", "model")
         if model_state is not None:
             model = ShallowCNN(n_channels=features.shape[1], n_mfcc=features.shape[2])
             model.load_state_dict(model_state)
@@ -832,6 +764,7 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
 
 if __name__ == "__main__":
     import argparse
+    import os
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -852,7 +785,7 @@ if __name__ == "__main__":
         type=str,
         choices=["train", "dev", "eval-dev", "eval-cv"],
         default="train",
-        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models for eval",
+        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models",
     )
     parser.add_argument(
         "--spec-aug",
