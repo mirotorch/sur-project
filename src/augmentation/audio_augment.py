@@ -5,6 +5,7 @@ Implements various augmentation techniques to expand limited training data.
 """
 
 import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -25,11 +26,10 @@ OUTPUT_DIRS = {
 }
 
 # Augmentation parameters
-SPEED_FACTORS = [0.9, 1.1]
-VOLUME_FACTORS = [0.5, 2.0]
+SPEED_FACTORS = [0.7, 0.9, 1.1, 1.3]
+VOLUME_FACTORS = [0.5, 1.5, 2.0]
 NOISE_SNRS = [10, 20, 30]  # dB
-TIME_SHIFTS = [-0.1, 0.1]  # seconds
-COMBINED = [("speed09", "noise20"), ("vol05", "noise20")]
+TIME_SHIFTS = [-0.15, -0.1, 0.1, 0.15]  # seconds
 
 
 def speed_perturbation(input_file, output_file, speed_factor):
@@ -92,72 +92,78 @@ def time_shift(input_file, output_file, shift_seconds):
     sf.write(output_file, augmented, sr)
 
 
-def apply_augmentation(input_file, output_dir, augment_name, augment_fn, *args):
-    """Apply augmentation and save to output directory."""
-    os.makedirs(output_dir, exist_ok=True)
-    basename = Path(input_file).stem
-    output_file = output_dir / f"{basename}_{augment_name}.wav"
-
-    try:
-        augment_fn(input_file, output_file, *args)
-        return True
-    except Exception as e:
-        print(f"Error processing {input_file}: {e}")
-        return False
-
-
-def augment_class(class_name, original_dir, output_dir):
-    """Augment all files in a class directory."""
-    original_dir = Path(original_dir)
-    output_dir = Path(output_dir)
-
-    wav_files = list(original_dir.glob("*.wav"))
-    print(f"\nAugmenting {class_name} ({len(wav_files)} files)...")
-
+def augment_file(wav_file, output_dir, basename):
+    """Apply all augmentations to a single audio file."""
     count = 0
-    for wav_file in wav_files:
-        # Speed perturbation
-        for speed in SPEED_FACTORS:
-            name = f"speed{int(speed * 10)}"
-            if apply_augmentation(
-                wav_file, output_dir, name, speed_perturbation, speed
-            ):
-                count += 1
+    os.makedirs(output_dir, exist_ok=True)
 
-        # Volume perturbation
-        for vol in VOLUME_FACTORS:
-            name = f"vol{int(vol * 10)}"
-            if apply_augmentation(wav_file, output_dir, name, volume_perturbation, vol):
-                count += 1
+    # Speed perturbation
+    for speed in SPEED_FACTORS:
+        name = f"speed{int(speed * 10)}"
+        try:
+            speed_perturbation(str(wav_file), str(output_dir / f"{basename}_{name}.wav"), speed)
+            count += 1
+        except Exception:
+            pass
 
-        # Noise injection
-        for snr in NOISE_SNRS:
-            name = f"noise{snr}"
-            if apply_augmentation(wav_file, output_dir, name, add_noise, snr):
-                count += 1
+    # Volume perturbation
+    for vol in VOLUME_FACTORS:
+        name = f"vol{int(vol * 10)}"
+        try:
+            volume_perturbation(str(wav_file), str(output_dir / f"{basename}_{name}.wav"), vol)
+            count += 1
+        except Exception:
+            pass
 
-        # Time shift
-        for shift in TIME_SHIFTS:
-            name = f"shift{int(shift * 100)}"
-            if apply_augmentation(wav_file, output_dir, name, time_shift, shift):
-                count += 1
+    # Noise injection
+    for snr in NOISE_SNRS:
+        name = f"noise{snr}"
+        try:
+            add_noise(str(wav_file), str(output_dir / f"{basename}_{name}.wav"), snr)
+            count += 1
+        except Exception:
+            pass
 
-    print(f"  Created {count} augmented files")
+    # Time shift
+    for shift in TIME_SHIFTS:
+        name = f"shift{int(shift * 100)}"
+        try:
+            time_shift(str(wav_file), str(output_dir / f"{basename}_{name}.wav"), shift)
+            count += 1
+        except Exception:
+            pass
+
+    return count
 
 
 def main():
-    """Run audio augmentation for all classes."""
-    print("Starting audio augmentation...")
-    print(f"Project root: {PROJECT_ROOT}")
+    total_original = 0
+    total_augmented = 0
 
-    for class_name, original_dir in ORIGINAL_DIRS.items():
-        output_dir = OUTPUT_DIRS[class_name]
-        augment_class(class_name, original_dir, output_dir)
+    for category in ["target", "non_target"]:
+        input_dir = ORIGINAL_DIRS[category]
+        output_dir = OUTPUT_DIRS[category]
 
-    print("\nAugmentation complete!")
+        os.makedirs(output_dir, exist_ok=True)
+
+        wav_files = sorted(input_dir.glob("*.wav"))
+        print(f"\nProcessing {category} audio: {len(wav_files)}")
+
+        for wav_file in wav_files:
+            basename = wav_file.stem
+            try:
+                total_original += 1
+                count = augment_file(wav_file, output_dir, basename)
+                total_augmented += count
+                print(f"  {wav_file.name} -> {count} augmented")
+            except Exception as e:
+                print(f"  Error processing {wav_file.name}: {e}")
+
+    print("\n=== Summary ===")
+    print(f"Original files: {total_original}")
+    print(f"Augmented files: {total_augmented}")
+    print(f"Total files: {total_original + total_augmented}")
 
 
 if __name__ == "__main__":
-    import subprocess
-
     main()
