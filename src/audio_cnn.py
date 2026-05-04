@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
 from session_cv import k_fold, loso
+from spec_augment import SpecAugment
 from utils import compute_eer_threshold, save_predictions
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -57,15 +58,19 @@ def load_cv_threshold(cv_strategy, n_splits):
 class AudioDataset(Dataset):
     """Dataset for audio MFCC features."""
 
-    def __init__(self, features, labels):
+    def __init__(self, features, labels, transform=None):
         self.features = torch.FloatTensor(features)
         self.labels = torch.FloatTensor(labels)
+        self.transform = transform
 
     def __len__(self):
         return len(self.labels)
 
     def __getitem__(self, idx):
-        return self.features[idx], self.labels[idx]
+        feat = self.features[idx]
+        if self.transform:
+            feat = self.transform(feat)
+        return feat, self.labels[idx]
 
 
 class ShallowCNN(nn.Module):
@@ -98,20 +103,11 @@ class ShallowCNN(nn.Module):
         self.pool3 = nn.MaxPool2d(2, 2)
         self.dropout3 = nn.Dropout(dropout_conv)
 
-        self._get_conv_output_size(n_mfcc)
+        self.pool_final = nn.AdaptiveAvgPool2d((1, 1))
 
-        self.fc1 = nn.Linear(self.conv_output_size, 64)
+        self.fc1 = nn.Linear(128, 64)
         self.fc_dropout = nn.Dropout(dropout_fc)
         self.fc2 = nn.Linear(64, 1)
-
-    def _get_conv_output_size(self, n_mfcc):
-        """Calculate flattened size after conv layers."""
-        with torch.no_grad():
-            dummy = torch.zeros(1, 3, n_mfcc, 300)
-            dummy = self.pool1(F.relu(self.bn1(self.conv1(dummy))))
-            dummy = self.pool2(F.relu(self.bn2(self.conv2(dummy))))
-            dummy = self.pool3(F.relu(self.bn3(self.conv3(dummy))))
-            self.conv_output_size = dummy.view(1, -1).shape[1]
 
     def forward(self, x):
         x = self.pool1(F.relu(self.bn1(self.conv1(x))))
@@ -123,6 +119,7 @@ class ShallowCNN(nn.Module):
         x = self.pool3(F.relu(self.bn3(self.conv3(x))))
         x = self.dropout3(x)
 
+        x = self.pool_final(x)
         x = x.view(x.size(0), -1)
         x = F.relu(self.fc1(x))
         x = self.fc_dropout(x)
@@ -272,7 +269,7 @@ class CNNTrainer:
 
 
 def cross_validate(
-    features, labels, filenames, cv_strategy="loso", n_splits=2, epochs=50
+    features, labels, filenames, cv_strategy="loso", n_splits=2, epochs=50, spec_augment=None
 ):
     """
     Perform session-based cross-validation with CNN.
@@ -312,7 +309,7 @@ def cross_validate(
         X_train, X_val = features[train_idx], features[val_idx]
         y_train, y_val = labels[train_idx], labels[val_idx]
 
-        train_dataset = AudioDataset(X_train, y_train)
+        train_dataset = AudioDataset(X_train, y_train, transform=spec_augment)
         val_dataset = AudioDataset(X_val, y_val)
 
         use_cuda = torch.cuda.is_available()
@@ -377,7 +374,7 @@ def cross_validate(
     return results
 
 
-def train_final_model(features, labels, epochs=100):
+def train_final_model(features, labels, epochs=100, spec_augment=None):
     """
     Train final CNN model on all data.
 
@@ -385,13 +382,14 @@ def train_final_model(features, labels, epochs=100):
         features: All training features
         labels: All training labels
         epochs: Training epochs
+        spec_augment: Optional SpecAugment transform for training
 
     Returns:
         Trained model
     """
     print("\n=== Training Final CNN Model ===")
 
-    dataset = AudioDataset(features, labels)
+    dataset = AudioDataset(features, labels, transform=spec_augment)
     use_cuda = torch.cuda.is_available()
     loader = DataLoader(
         dataset,
@@ -585,7 +583,7 @@ def predict_on_eval(model, trainer, base_dir=None, cv_strategy="kfold", n_splits
     }
 
 
-def main(mode="train", cv_strategy="kfold", n_splits=2):
+def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
     """
     Main training pipeline.
 
@@ -618,11 +616,12 @@ def main(mode="train", cv_strategy="kfold", n_splits=2):
             cv_strategy=cv_strategy,
             n_splits=n_splits,
             epochs=10,
+            spec_augment=spec_augment,
         )
 
     elif mode == "dev":
         print("\n" + "=" * 50)
-        model, trainer = train_final_model(features, labels, epochs=20)
+        model, trainer = train_final_model(features, labels, epochs=20, spec_augment=spec_augment)
 
         dev_results = predict_on_dev(
             model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
@@ -636,7 +635,7 @@ def main(mode="train", cv_strategy="kfold", n_splits=2):
 
     elif mode == "eval":
         print("\n" + "=" * 50)
-        model, trainer = train_final_model(features, labels, epochs=20)
+        model, trainer = train_final_model(features, labels, epochs=20, spec_augment=spec_augment)
 
         dev_results = predict_on_dev(
             model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
@@ -662,7 +661,7 @@ if __name__ == "__main__":
         type=str,
         choices=["kfold", "loso"],
         default="kfold",
-        help="Cross-validation strategy to use (default: loso)",
+        help="Cross-validation strategy to use (default: kfold)",
     )
     parser.add_argument(
         "--n-splits",
@@ -677,6 +676,51 @@ if __name__ == "__main__":
         default="train",
         help="train: cross-validation, dev: train on all dev data and evaluate on dev, eval: train on dev and predict on eval",
     )
+    parser.add_argument(
+        "--spec-aug",
+        action="store_true",
+        help="Enable SpecAugment (frequency + time masking)",
+    )
+    parser.add_argument(
+        "--freq-mask",
+        type=int,
+        default=10,
+        help="Maximum frequency mask width in MFCC bins (default: 10)",
+    )
+    parser.add_argument(
+        "--time-mask",
+        type=int,
+        default=40,
+        help="Maximum time mask width in time steps (default: 40)",
+    )
+    parser.add_argument(
+        "--num-freq-masks",
+        type=int,
+        default=2,
+        help="Number of frequency masks per sample (default: 2)",
+    )
+    parser.add_argument(
+        "--num-time-masks",
+        type=int,
+        default=2,
+        help="Number of time masks per sample (default: 2)",
+    )
 
     args = parser.parse_args()
-    main(mode=args.mode, cv_strategy=args.cv_strategy, n_splits=args.n_splits)
+
+    spec_aug = None
+    if args.spec_aug:
+        spec_aug = SpecAugment(
+            freq_mask_param=args.freq_mask,
+            time_mask_param=args.time_mask,
+            num_freq_masks=args.num_freq_masks,
+            num_time_masks=args.num_time_masks,
+        )
+        print(
+            f"SpecAugment enabled: freq_mask={args.freq_mask}, "
+            f"time_mask={args.time_mask}, "
+            f"num_freq_masks={args.num_freq_masks}, "
+            f"num_time_masks={args.num_time_masks}"
+        )
+
+    main(mode=args.mode, cv_strategy=args.cv_strategy, n_splits=args.n_splits, spec_augment=spec_aug)
