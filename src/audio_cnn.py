@@ -5,6 +5,7 @@ CNN-based audio person detector using MFCC features.
 import os
 from pathlib import Path
 
+import joblib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -52,6 +53,38 @@ def load_cv_threshold(cv_strategy, n_splits):
         threshold = np.load(cache_path)[0]
         print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
         return threshold
+    return None
+
+
+def get_model_cache_path(model_type, cv_strategy=None, n_splits=None, fold=None):
+    """Generate cache file path for models."""
+    if cv_strategy and n_splits:
+        if fold is not None:
+            filename = (
+                f"model_cnn_{model_type}_fold{fold}_{cv_strategy}_{n_splits}.joblib"
+            )
+        else:
+            filename = f"model_cnn_{model_type}_{cv_strategy}_{n_splits}.joblib"
+    else:
+        filename = f"model_cnn_{model_type}_dev.joblib"
+    return os.path.join(CACHE_DIR, filename)
+
+
+def save_model_cache(model, model_type, cv_strategy=None, n_splits=None, fold=None):
+    """Save model to cache."""
+    ensure_cache_dir()
+    cache_path = get_model_cache_path(model_type, cv_strategy, n_splits, fold)
+    joblib.dump(model, cache_path)
+    print(f"  Saved {model_type} to {cache_path}")
+
+
+def load_model_cache(model_type, cv_strategy=None, n_splits=None, fold=None):
+    """Load model from cache."""
+    cache_path = get_model_cache_path(model_type, cv_strategy, n_splits, fold)
+    if os.path.exists(cache_path):
+        model = joblib.load(cache_path)
+        print(f"  Loaded {model_type} from {cache_path}")
+        return model
     return None
 
 
@@ -128,6 +161,23 @@ class ShallowCNN(nn.Module):
         return x.squeeze(1)
 
 
+class LabelSmoothingBCEWithLogitsLoss(nn.Module):
+    """BCEWithLogitsLoss with label smoothing for binary classification."""
+
+    def __init__(self, pos_weight, smoothing=0.0):
+        super().__init__()
+        self.smoothing = smoothing
+        self.criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+
+    def forward(self, inputs, targets):
+        if self.smoothing > 0:
+            smoothed_targets = (
+                targets * (1 - self.smoothing) + (1 - targets) * self.smoothing
+            )
+            return self.criterion(inputs, smoothed_targets)
+        return self.criterion(inputs, targets)
+
+
 class CNNTrainer:
     """Trainer for CNN audio detector."""
 
@@ -145,7 +195,7 @@ class CNNTrainer:
         val_loader,
         epochs=50,
         lr=0.001,
-        weight_decay=1e-4,
+        weight_decay=1e-2,
         patience=10,
     ):
         """
@@ -269,7 +319,13 @@ class CNNTrainer:
 
 
 def cross_validate(
-    features, labels, filenames, cv_strategy="loso", n_splits=2, epochs=50, spec_augment=None
+    features,
+    labels,
+    filenames,
+    cv_strategy="loso",
+    n_splits=2,
+    epochs=50,
+    spec_augment=None,
 ):
     """
     Perform session-based cross-validation with CNN.
@@ -343,6 +399,9 @@ def cross_validate(
         fold_predictions = (scores > fold_threshold).astype(int)
         fold_acc = accuracy_score(y_val, fold_predictions)
 
+        # Save fold model to cache
+        save_model_cache(model.state_dict(), "audio", cv_strategy, n_splits, fold=fold)
+
         results.append(
             {
                 "fold": fold,
@@ -406,6 +465,9 @@ def train_final_model(features, labels, epochs=100, spec_augment=None):
         dataset, batch_size=64, pin_memory=use_cuda, num_workers=4 if use_cuda else 0
     )
     history = trainer.train(loader, dummy_loader, epochs=epochs)
+
+    # Save model to cache
+    save_model_cache(model.state_dict(), "audio")
 
     return model, trainer
 
@@ -583,13 +645,99 @@ def predict_on_eval(model, trainer, base_dir=None, cv_strategy="kfold", n_splits
     }
 
 
+def predict_on_eval_cv(
+    features,
+    labels,
+    filenames,
+    cv_strategy="kfold",
+    n_splits=2,
+    epochs=50,
+    spec_augment=None,
+):
+    """
+    Evaluate on eval set using ensemble of CV-trained models.
+    """
+    base_dir = PROJECT_ROOT / "dataset"
+
+    print("\nEvaluating on eval set with CNN (CV Ensemble)...")
+
+    # Load CV models from cache
+    cv_models = []
+    for fold in range(n_splits if cv_strategy == "kfold" else 10):
+        model_state = load_model_cache("audio", cv_strategy, n_splits, fold)
+        if model_state is not None:
+            model = ShallowCNN(n_channels=features.shape[1], n_mfcc=features.shape[2])
+            model.load_state_dict(model_state)
+            cv_models.append(model)
+        else:
+            print(f"  Warning: Could not load model for fold {fold}, skipping...")
+
+    if not cv_models:
+        print("  No CV models found in cache. Run 'train' mode first.")
+        return None
+
+    print(f"  Loaded {len(cv_models)} CV models")
+
+    # Use mean CV threshold
+    optimal_threshold = load_cv_threshold(cv_strategy, n_splits)
+    if optimal_threshold is None:
+        print("  No CV threshold found in cache, defaulting to 0.5")
+        optimal_threshold = 0.5
+
+    eval_dir = base_dir / "eval"
+    if not eval_dir.exists():
+        print("Eval directory not found. Skipping eval.")
+        return None
+
+    extractor = MFCCExtractor()
+    eval_paths, eval_fnames = _get_audio_files(str(eval_dir))
+    eval_features = extractor.extract_batch(eval_paths, use_cache=True)
+
+    # Dummy labels since eval set has no ground truth
+    eval_dataset = AudioDataset(eval_features, [0] * len(eval_paths))
+    use_cuda = torch.cuda.is_available()
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=64,
+        shuffle=False,
+        pin_memory=use_cuda,
+        num_workers=4 if use_cuda else 0,
+    )
+
+    # Ensemble: average predictions from all CV models
+    all_scores = []
+    for model in cv_models:
+        trainer = CNNTrainer(model)
+        scores = trainer.predict(eval_loader)
+        all_scores.append(scores)
+
+    # Average ensemble scores
+    scores = np.mean(all_scores, axis=0)
+    predictions = (scores > optimal_threshold).astype(int)
+
+    output_dir = PROJECT_ROOT / "results"
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_file = output_dir / "audio_cnn_eval_cv.txt"
+    save_predictions(str(output_file), eval_fnames, scores, threshold=optimal_threshold)
+
+    print(f"  Eval-CV predictions saved to {output_file}")
+
+    return {
+        "filenames": eval_fnames,
+        "scores": scores,
+        "predictions": predictions,
+        "optimal_threshold": optimal_threshold,
+    }
+
+
 def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
     """
     Main training pipeline.
 
     Args:
-        mode: One of "train" (cross-validation), "dev" (train on all dev data),
-             or "eval" (train on dev and predict on eval)
+        mode: One of "train" (cross-validation with caching), "dev" (train on all dev data with caching),
+             "eval-dev" (use dev-trained model for eval), or "eval-cv" (use ensemble of CV-trained models)
         cv_strategy: Cross-validation strategy ("kfold" or "loso")
         n_splits: Number of folds for kfold strategy
     """
@@ -621,7 +769,9 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
 
     elif mode == "dev":
         print("\n" + "=" * 50)
-        model, trainer = train_final_model(features, labels, epochs=20, spec_augment=spec_augment)
+        model, trainer = train_final_model(
+            features, labels, epochs=20, spec_augment=spec_augment
+        )
 
         dev_results = predict_on_dev(
             model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
@@ -633,9 +783,19 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
         print(f"  Dev AUC: {dev_results['auc']:.4f}")
         print(f"\nResults saved to {PROJECT_ROOT / 'results' / 'audio_cnn.txt'}")
 
-    elif mode == "eval":
+    elif mode == "eval-dev":
         print("\n" + "=" * 50)
-        model, trainer = train_final_model(features, labels, epochs=20, spec_augment=spec_augment)
+        # Try to load dev-trained model from cache
+        model_state = load_model_cache("audio")
+        if model_state is not None:
+            model = ShallowCNN(n_channels=features.shape[1], n_mfcc=features.shape[2])
+            model.load_state_dict(model_state)
+            trainer = CNNTrainer(model)
+        else:
+            print("Dev model not found in cache. Training new model...")
+            model, trainer = train_final_model(
+                features, labels, epochs=20, spec_augment=spec_augment
+            )
 
         dev_results = predict_on_dev(
             model, trainer, base_dir, cv_strategy=cv_strategy, n_splits=n_splits
@@ -646,9 +806,27 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
         )
 
         print("\n" + "=" * 50)
-        print("Final Results (Eval):")
+        print("Final Results (Eval-Dev):")
         print(
             f"  Eval predictions saved to {PROJECT_ROOT / 'results' / 'audio_cnn_eval.txt'}"
+        )
+
+    elif mode == "eval-cv":
+        print("\n" + "=" * 50)
+        eval_results = predict_on_eval_cv(
+            features,
+            labels,
+            filenames,
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
+            epochs=20,
+            spec_augment=spec_augment,
+        )
+
+        print("\n" + "=" * 50)
+        print("Final Results (Eval-CV):")
+        print(
+            f"  Eval predictions saved to {PROJECT_ROOT / 'results' / 'audio_cnn_eval_cv.txt'}"
         )
 
 
@@ -672,9 +850,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["train", "dev", "eval"],
+        choices=["train", "dev", "eval-dev", "eval-cv"],
         default="train",
-        help="train: cross-validation, dev: train on all dev data and evaluate on dev, eval: train on dev and predict on eval",
+        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models for eval",
     )
     parser.add_argument(
         "--spec-aug",
@@ -723,4 +901,9 @@ if __name__ == "__main__":
             f"num_time_masks={args.num_time_masks}"
         )
 
-    main(mode=args.mode, cv_strategy=args.cv_strategy, n_splits=args.n_splits, spec_augment=spec_aug)
+    main(
+        mode=args.mode,
+        cv_strategy=args.cv_strategy,
+        n_splits=args.n_splits,
+        spec_augment=spec_aug,
+    )

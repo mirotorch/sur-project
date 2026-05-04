@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import joblib
 from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -61,6 +62,37 @@ def load_cv_threshold(method, cv_strategy, n_splits, n_components):
         threshold = np.load(cache_path)[0]
         print(f"  Loaded CV mean threshold from {cache_path}: {threshold:.4f}")
         return threshold
+    return None
+
+
+def get_model_cache_path(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+    """Generate cache file path for models."""
+    n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
+    if cv_strategy and n_splits:
+        if fold is not None:
+            filename = f"model_{method}_{model_type}_fold{fold}_{cv_strategy}_{n_splits}_{n_comp_str}.joblib"
+        else:
+            filename = f"model_{method}_{model_type}_{cv_strategy}_{n_splits}_{n_comp_str}.joblib"
+    else:
+        filename = f"model_{method}_{model_type}_dev_{n_comp_str}.joblib"
+    return os.path.join(CACHE_DIR, filename)
+
+
+def save_model_cache(model, method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+    """Save model to cache."""
+    ensure_cache_dir()
+    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
+    joblib.dump(model, cache_path)
+    print(f"  Saved {model_type} to {cache_path}")
+
+
+def load_model_cache(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+    """Load model from cache."""
+    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
+    if os.path.exists(cache_path):
+        model = joblib.load(cache_path)
+        print(f"  Loaded {model_type} from {cache_path}")
+        return model
     return None
 
 
@@ -309,6 +341,12 @@ def cross_validate(
         print(f"  AUC: {result['auc']:.4f}")
         print(f"  Fold EER: {fold_eer:.4f}, Threshold: {fold_threshold:.4f}")
 
+        # Save fold models to cache
+        save_model_cache(svm, method, "svm", cv_strategy, n_splits, n_components, fold)
+        save_model_cache(scaler, method, "scaler", cv_strategy, n_splits, n_components, fold)
+        if pca is not None:
+            save_model_cache(pca, method, "pca", cv_strategy, n_splits, n_components, fold)
+
         results.append(
             {
                 "fold": fold,
@@ -394,6 +432,12 @@ def train_final_model(
         X_transformed = X_scaled
 
     svm = train_svm(X_transformed, labels, C)
+
+    # Save models to cache
+    save_model_cache(svm, method, "svm")
+    save_model_cache(scaler, method, "scaler")
+    if pca is not None:
+        save_model_cache(pca, method, "pca")
 
     return svm, scaler, pca, X_transformed.shape[1]
 
@@ -601,6 +645,119 @@ def predict_on_eval(
     }
 
 
+def predict_on_eval_cv(
+    images,
+    labels,
+    filenames,
+    method="hog",
+    cv_strategy="kfold",
+    n_splits=2,
+    C=1.0,
+    n_components=None,
+    use_cache=True,
+    hog_kwargs=None,
+    lbp_kwargs=None,
+    **feature_kwargs,
+):
+    """
+    Evaluate on eval set using ensemble of CV-trained models.
+
+    Returns:
+        dict with predictions, scores, and metrics
+    """
+    base_dir = PROJECT_ROOT / "dataset"
+
+    print(f"\nEvaluating on eval set with {method.upper()} (CV Ensemble)...")
+
+    # Load CV models from cache
+    cv_models = []
+    for fold in range(n_splits if cv_strategy == "kfold" else 10):
+        svm = load_model_cache(method, "svm", cv_strategy, n_splits, n_components, fold)
+        scaler = load_model_cache(method, "scaler", cv_strategy, n_splits, n_components, fold)
+        pca = load_model_cache(method, "pca", cv_strategy, n_splits, n_components, fold)
+
+        if svm is None or scaler is None:
+            print(f"  Warning: Could not load models for fold {fold}, skipping...")
+            continue
+
+        cv_models.append({"svm": svm, "scaler": scaler, "pca": pca})
+
+    if not cv_models:
+        print("  No CV models found in cache. Run 'train' mode first.")
+        return None
+
+    print(f"  Loaded {len(cv_models)} CV models")
+
+    # Use mean CV threshold
+    optimal_threshold = load_cv_threshold(method, cv_strategy, n_splits, n_components)
+    if optimal_threshold is None:
+        print("  No CV threshold found in cache, defaulting to 0.5")
+        optimal_threshold = 0.5
+
+    eval_dir = os.path.join(base_dir, "eval")
+    if not os.path.exists(eval_dir):
+        print("Eval directory not found. Skipping eval.")
+        return None
+
+    eval_images, eval_filenames = load_images(eval_dir)
+
+    if method == "combined":
+        eval_features = extract_combined_features_cached(
+            eval_images,
+            use_cache=use_cache,
+            hog_kwargs=hog_kwargs,
+            lbp_kwargs=lbp_kwargs,
+        )
+    else:
+        eval_features = extract_features_cached(
+            eval_images, method, use_cache, **feature_kwargs
+        )
+
+    # Ensemble: average predictions from all CV models
+    all_scores = []
+    for model_dict in cv_models:
+        svm = model_dict["svm"]
+        scaler = model_dict["scaler"]
+        pca = model_dict["pca"]
+
+        eval_scaled = scaler.transform(eval_features)
+        if pca is not None:
+            eval_transformed = pca.transform(eval_scaled)
+        else:
+            eval_transformed = eval_scaled
+
+        scores = svm.decision_function(eval_transformed)
+        all_scores.append(scores)
+
+    # Average ensemble scores
+    eval_scores_raw = np.mean(all_scores, axis=0)
+
+    score_min, score_max = eval_scores_raw.min(), eval_scores_raw.max()
+    if score_max - score_min > 1e-10:
+        eval_calibrated = (eval_scores_raw - score_min) / (score_max - score_min)
+    else:
+        eval_calibrated = np.ones_like(eval_scores_raw) * 0.5
+
+    predictions = (eval_calibrated > optimal_threshold).astype(int)
+
+    output_dir = PROJECT_ROOT / "results"
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_file = os.path.join(output_dir, f"image_{method}_eval_cv.txt")
+    save_predictions(
+        output_file, eval_filenames, eval_calibrated, threshold=optimal_threshold
+    )
+
+    print(f"  Eval-CV predictions saved to {output_file}")
+
+    return {
+        "filenames": eval_filenames,
+        "scores": eval_calibrated,
+        "predictions": predictions,
+        "optimal_threshold": optimal_threshold,
+    }
+
+
 def main(
     mode="train",
     cv_strategy="kfold",
@@ -613,8 +770,8 @@ def main(
     Main training pipeline.
 
     Args:
-        mode: One of "train" (cross-validation), "dev" (train on all dev data),
-             or "eval" (train on dev and predict on eval)
+        mode: One of "train" (cross-validation with caching), "dev" (train on all dev data with caching),
+             "eval-dev" (use dev-trained model for eval), or "eval-cv" (use ensemble of CV-trained models)
         cv_strategy: Cross-validation strategy ("kfold" or "loso")
         n_splits: Number of folds for kfold strategy
         n_components: PCA components (int for number, float for variance ratio, None for no PCA)
@@ -760,52 +917,48 @@ def main(
         )
         print(f"\nResults saved to {PROJECT_ROOT / 'results'}")
 
-    elif mode == "eval":
+    elif mode == "eval-dev":
         print("\n" + "=" * 50)
-        if method == "combined":
-            svm, scaler, pca, feat_dim = train_final_model(
-                images,
-                labels,
-                method="combined",
-                C=C,
-                n_components=n_components,
-                hog_kwargs=hog_params,
-                lbp_kwargs=lbp_params,
-            )
-        elif method == "hog":
-            svm, scaler, pca, feat_dim = train_final_model(
-                images,
-                labels,
-                method="hog",
-                C=C,
-                n_components=n_components,
-                **hog_params,
-            )
-        elif method == "lbp":
-            svm, scaler, pca, feat_dim = train_final_model(
-                images,
-                labels,
-                method="lbp",
-                C=C,
-                n_components=n_components,
-                **lbp_params,
-            )
+        # Try to load dev-trained model from cache
+        svm = load_model_cache(method, "svm")
+        scaler = load_model_cache(method, "scaler")
+        pca = load_model_cache(method, "pca")
 
-        print(f"{method.upper()} feature dimension: {feat_dim}")
+        if svm is None or scaler is None:
+            print("Dev model not found in cache. Training new model...")
+            if method == "combined":
+                svm, scaler, pca, feat_dim = train_final_model(
+                    images,
+                    labels,
+                    method="combined",
+                    C=C,
+                    n_components=n_components,
+                    hog_kwargs=hog_params,
+                    lbp_kwargs=lbp_params,
+                )
+            elif method == "hog":
+                svm, scaler, pca, feat_dim = train_final_model(
+                    images,
+                    labels,
+                    method="hog",
+                    C=C,
+                    n_components=n_components,
+                    **hog_params,
+                )
+            elif method == "lbp":
+                svm, scaler, pca, feat_dim = train_final_model(
+                    images,
+                    labels,
+                    method="lbp",
+                    C=C,
+                    n_components=n_components,
+                    **lbp_params,
+                )
+            print(f"{method.upper()} feature dimension: {feat_dim}")
 
+        # Evaluate on dev
         if method == "combined":
             dev_result = predict_on_dev(
-                svm,
-                scaler,
-                method="combined",
-                pca=pca,
-                cv_strategy=cv_strategy,
-                n_splits=n_splits,
-                n_components=n_components,
-                hog_kwargs=hog_params,
-                lbp_kwargs=lbp_params,
-            )
-            eval_result = predict_on_eval(
                 svm,
                 scaler,
                 method="combined",
@@ -827,16 +980,6 @@ def main(
                 n_components=n_components,
                 **hog_params,
             )
-            eval_result = predict_on_eval(
-                svm,
-                scaler,
-                method="hog",
-                pca=pca,
-                cv_strategy=cv_strategy,
-                n_splits=n_splits,
-                n_components=n_components,
-                **hog_params,
-            )
         elif method == "lbp":
             dev_result = predict_on_dev(
                 svm,
@@ -848,6 +991,32 @@ def main(
                 n_components=n_components,
                 **lbp_params,
             )
+
+        # Predict on eval using dev model
+        if method == "combined":
+            eval_result = predict_on_eval(
+                svm,
+                scaler,
+                method="combined",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            eval_result = predict_on_eval(
+                svm,
+                scaler,
+                method="hog",
+                pca=pca,
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                n_components=n_components,
+                **hog_params,
+            )
+        elif method == "lbp":
             eval_result = predict_on_eval(
                 svm,
                 scaler,
@@ -860,13 +1029,57 @@ def main(
             )
 
         print("\n" + "=" * 50)
-        print("Final Results (Eval):")
+        print("Final Results (Eval-Dev):")
         print(
             f"  {method.upper()} predictions saved to {PROJECT_ROOT / 'results' / f'image_{method}_eval.txt'}"
         )
-        if eval_result.get("accuracy") is not None:
-            print(f"  Eval Accuracy: {eval_result['accuracy']:.4f}")
-            print(f"  Eval AUC: {eval_result['auc']:.4f}")
+
+    elif mode == "eval-cv":
+        print("\n" + "=" * 50)
+        # Evaluate on dev using CV ensemble
+        if method == "combined":
+            dev_result = predict_on_eval_cv(
+                images,
+                labels,
+                filenames,
+                method="combined",
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                C=C,
+                n_components=n_components,
+                hog_kwargs=hog_params,
+                lbp_kwargs=lbp_params,
+            )
+        elif method == "hog":
+            dev_result = predict_on_eval_cv(
+                images,
+                labels,
+                filenames,
+                method="hog",
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                C=C,
+                n_components=n_components,
+                **hog_params,
+            )
+        elif method == "lbp":
+            dev_result = predict_on_eval_cv(
+                images,
+                labels,
+                filenames,
+                method="lbp",
+                cv_strategy=cv_strategy,
+                n_splits=n_splits,
+                C=C,
+                n_components=n_components,
+                **lbp_params,
+            )
+
+        print("\n" + "=" * 50)
+        print("Final Results (Eval-CV):")
+        print(
+            f"  {method.upper()} predictions saved to {PROJECT_ROOT / 'results' / f'image_{method}_eval_cv.txt'}"
+        )
 
 
 if __name__ == "__main__":
@@ -891,9 +1104,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["train", "dev", "eval"],
+        choices=["train", "dev", "eval-dev", "eval-cv"],
         default="train",
-        help="train: cross-validation, dev: train on all dev data and evaluate on dev, eval: train on dev and predict on eval",
+        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models for eval",
     )
     parser.add_argument(
         "--method",
