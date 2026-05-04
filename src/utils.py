@@ -99,7 +99,26 @@ def load_model_cache(
 
 def compute_dataset_hash(images):
     """Compute simple hash of dataset for cache invalidation."""
-    return f"{len(images)}_{images.shape[1]}_{images.shape[2]}"
+    if len(images) == 0:
+        return "0_0_0"
+    # Handle list of images
+    if isinstance(images, list):
+        if len(images) == 0:
+            return "0_0_0"
+        first = images[0]
+        if hasattr(first, 'shape') and len(first.shape) >= 2:
+            return f"{len(images)}_{first.shape[0]}_{first.shape[1]}"
+        return f"{len(images)}_0_0"
+    # Handle numpy array
+    try:
+        if len(images.shape) >= 3:
+            return f"{len(images)}_{images.shape[1]}_{images.shape[2]}"
+        elif len(images.shape) == 2:
+            return f"{len(images)}_{images.shape[1]}_0"
+        else:
+            return f"{len(images)}_0_0"
+    except (IndexError, AttributeError):
+        return f"{len(images)}_0_0"
 
 
 def get_feature_cache_path(method, params_str, dataset_hash):

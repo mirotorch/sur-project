@@ -14,15 +14,9 @@ from torch.utils.data import DataLoader, Dataset
 from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
 from session_cv import k_fold, loso
 from spec_augment import SpecAugment
-from utils import (
-    _get_audio_files,
-    compute_eer_threshold,
-    load_cv_threshold,
-    load_model_cache,
-    save_cv_threshold,
-    save_model_cache,
-    save_predictions,
-)
+from utils import (_get_audio_files, compute_eer_threshold, load_cv_threshold,
+                   load_model_cache, save_cv_threshold, save_model_cache,
+                   save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -340,9 +334,9 @@ def cross_validate(
         fold_acc = accuracy_score(y_val, fold_predictions)
 
         # Save fold model to cache
-        save_model_cache(
-            model.state_dict(), "cnn", "model", cv_strategy, n_splits, fold=fold
-        )
+        # save_model_cache(
+        #    model.state_dict(), "cnn", "model", cv_strategy, n_splits, fold=fold
+        # )
 
         results.append(
             {
@@ -493,7 +487,7 @@ def predict_on_dev(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=
     output_dir = PROJECT_ROOT / "results"
     os.makedirs(output_dir, exist_ok=True)
     output_file = output_dir / "audio_cnn.txt"
-    save_predictions(str(output_file), all_fnames, scores, threshold=optimal_threshold)
+    # save_predictions(str(output_file), all_fnames, scores, threshold=optimal_threshold)
 
     return {
         "filenames": all_fnames,
@@ -716,7 +710,7 @@ def main(mode="train", cv_strategy="kfold", n_splits=2, spec_augment=None):
         print(f"  Dev AUC: {dev_results['auc']:.4f}")
         print(f"\nResults saved to {PROJECT_ROOT / 'results' / 'audio_cnn.txt'}")
 
-    elif mode == "eval-dev":
+    elif mode == "eval":
         print("\n" + "=" * 50)
         # Try to load dev-trained model from cache
         model_state = load_model_cache("cnn", "model")
@@ -773,7 +767,7 @@ if __name__ == "__main__":
         type=str,
         choices=["kfold", "loso"],
         default="loso",
-        help="Cross-validation strategy to use (default: kfold)",
+        help="Cross-validation strategy to use (default: loso)",
     )
     parser.add_argument(
         "--n-splits",

@@ -18,17 +18,12 @@ from torch.utils.data import DataLoader, Dataset
 from audio_cnn import ShallowCNN
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
-from extractors.mfcc_extractor import load_audio_dataset
+from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
 from session_cv import k_fold, loso
-from utils import (
-    compute_dataset_hash,
-    compute_eer_threshold,
-    load_cv_threshold,
-    load_model_cache,
-    save_cv_threshold,
-    save_model_cache,
-    save_predictions,
-)
+from utils import (_get_audio_files, compute_dataset_hash,
+                   compute_eer_threshold, load_cv_threshold, load_images,
+                   load_model_cache, save_cv_threshold, save_model_cache,
+                   save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
@@ -489,25 +484,20 @@ def train_final_model(
 def prepare_eval_data(
     base_dir, method="hog", n_components=None, scaler=None, pca=None, use_cache=True
 ):
-    """Prepare eval data for fusion prediction."""
     print("Loading eval dataset...")
-
     base_dir = Path(base_dir)
+    eval_dir = base_dir / "eval"
 
-    # Load eval audio
-    eval_audio_dir = base_dir / "eval"
-    audio_features, _, eval_filenames = load_audio_dataset(
-        str(eval_audio_dir), use_augmented=False
-    )
+    audio_paths, eval_filenames = _get_audio_files(eval_dir)
+    extractor = MFCCExtractor()
+    audio_features = extractor.extract_batch(audio_paths, use_cache=True)
     print(f"Eval Audio: {len(audio_features)} samples")
 
-    # Load eval images
-    from utils import load_dataset
-
-    eval_images, _, img_filenames = load_dataset(
-        str(eval_audio_dir), use_augmented=False
-    )
+    eval_images, img_filenames = load_images(eval_dir)
     print(f"Eval Images: {len(eval_images)} samples")
+
+    if len(eval_images) == 0:
+        raise ValueError(f"Nenalezeny žádné obrázky v {eval_dir}!")
 
     # Extract image features
     hog_params = {
@@ -619,9 +609,9 @@ def predict_on_dev(
     output_dir = PROJECT_ROOT / "results"
     output_dir.mkdir(exist_ok=True)
     output_file = output_dir / "fusion.txt"
-    save_predictions(
-        str(output_file), data["filenames"], scores, threshold=optimal_threshold
-    )
+    # save_predictions(
+    #     str(output_file), data["filenames"], scores, threshold=optimal_threshold
+    # )
 
     return {
         "filenames": data["filenames"],
@@ -856,7 +846,7 @@ def main(
         print(f"  Dev AUC: {dev_results['auc']:.4f}")
         print(f"\nResults saved to {PROJECT_ROOT / 'results' / 'fusion.txt'}")
 
-    elif mode == "eval-dev":
+    elif mode == "eval":
         print("\n" + "=" * 50)
         # Try to load dev-trained model from cache
         model_state = load_model_cache("fusion", "model")

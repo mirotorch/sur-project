@@ -15,17 +15,10 @@ from sklearn.svm import LinearSVC
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from session_cv import k_fold, loso
-from utils import (
-    compute_dataset_hash,
-    compute_eer_threshold,
-    load_cv_threshold,
-    load_dataset,
-    load_images,
-    load_model_cache,
-    save_cv_threshold,
-    save_model_cache,
-    save_predictions,
-)
+from utils import (compute_dataset_hash, compute_eer_threshold,
+                   load_cv_threshold, load_dataset, load_images,
+                   load_model_cache, save_cv_threshold, save_model_cache,
+                   save_predictions)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -271,14 +264,14 @@ def cross_validate(
         print(f"  Fold EER: {fold_eer:.4f}, Threshold: {fold_threshold:.4f}")
 
         # Save fold models to cache
-        save_model_cache(svm, method, "svm", cv_strategy, n_splits, n_components, fold)
-        save_model_cache(
-            scaler, method, "scaler", cv_strategy, n_splits, n_components, fold
-        )
-        if pca is not None:
-            save_model_cache(
-                pca, method, "pca", cv_strategy, n_splits, n_components, fold
-            )
+        # save_model_cache(svm, method, "svm", cv_strategy, n_splits, n_components, fold)
+        # save_model_cache(
+        #    scaler, method, "scaler", cv_strategy, n_splits, n_components, fold
+        # )
+        # if pca is not None:
+        #   save_model_cache(
+        #      pca, method, "pca", cv_strategy, n_splits, n_components, fold
+        # )
 
         results.append(
             {
@@ -339,7 +332,7 @@ def train_final_model(
     Returns:
         tuple: (svm, scaler, pca, feature_size)
     """
-    print(f"\n=== Training final {method.upper()} model on all data ===")
+    print(f"\n=== Training final {method} model on all data ===")
     if n_components is not None:
         print(f"  Using PCA with n_components={n_components}")
 
@@ -458,12 +451,12 @@ def predict_on_dev(
     output_dir.mkdir(exist_ok=True)
 
     output_file = output_dir / f"image_{method}.txt"
-    save_predictions(
-        str(output_file),
-        dev_fnames_all,
-        result["calibrated_scores"],
-        threshold=optimal_threshold,
-    )
+    # save_predictions(
+    #     str(output_file),
+    #     dev_fnames_all,
+    #     result["calibrated_scores"],
+    #     threshold=optimal_threshold,
+    # )
 
     return {
         "filenames": dev_fnames_all,
@@ -850,7 +843,7 @@ def main(
         )
         print(f"\nResults saved to {PROJECT_ROOT / 'results'}")
 
-    elif mode == "eval-dev":
+    elif mode == "eval":
         print("\n" + "=" * 50)
         # Try to load dev-trained model from cache
         svm = load_model_cache(method, "svm")
@@ -966,7 +959,6 @@ def main(
         print(
             f"  {method.upper()} predictions saved to {PROJECT_ROOT / 'results' / f'image_{method}_eval.txt'}"
         )
-
     elif mode == "eval-cv":
         print("\n" + "=" * 50)
         # Evaluate on dev using CV ensemble
@@ -1026,7 +1018,7 @@ if __name__ == "__main__":
         type=str,
         choices=["kfold", "loso"],
         default="loso",
-        help="Cross-validation strategy to use (default: kfold)",
+        help="Cross-validation strategy to use (default: loso)",
     )
     parser.add_argument(
         "--n-splits",
