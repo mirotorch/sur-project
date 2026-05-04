@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Image augmentation script for SUR project 2025/2026.
+Image augmentation script.
 Implements various augmentation techniques to expand limited training data.
 """
 

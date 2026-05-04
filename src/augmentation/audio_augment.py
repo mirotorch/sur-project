@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Audio augmentation script for SUR project 2025/2026.
+Audio augmentation script.
 Implements various augmentation techniques to expand limited training data.
 """
 
@@ -101,7 +101,9 @@ def augment_file(wav_file, output_dir, basename):
     for speed in SPEED_FACTORS:
         name = f"speed{int(speed * 10)}"
         try:
-            speed_perturbation(str(wav_file), str(output_dir / f"{basename}_{name}.wav"), speed)
+            speed_perturbation(
+                str(wav_file), str(output_dir / f"{basename}_{name}.wav"), speed
+            )
             count += 1
         except Exception:
             pass
@@ -110,7 +112,9 @@ def augment_file(wav_file, output_dir, basename):
     for vol in VOLUME_FACTORS:
         name = f"vol{int(vol * 10)}"
         try:
-            volume_perturbation(str(wav_file), str(output_dir / f"{basename}_{name}.wav"), vol)
+            volume_perturbation(
+                str(wav_file), str(output_dir / f"{basename}_{name}.wav"), vol
+            )
             count += 1
         except Exception:
             pass

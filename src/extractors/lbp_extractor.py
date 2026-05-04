@@ -1,6 +1,5 @@
 """
 Local Binary Patterns (LBP) feature extractor.
-Vectorized implementation using numpy only.
 """
 
 import numpy as np

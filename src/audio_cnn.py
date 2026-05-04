@@ -14,8 +14,15 @@ from torch.utils.data import DataLoader, Dataset
 from extractors.mfcc_extractor import MFCCExtractor, load_audio_dataset
 from session_cv import k_fold, loso
 from spec_augment import SpecAugment
-from utils import (compute_eer_threshold, load_cv_threshold, load_model_cache,
-                   save_cv_threshold, save_model_cache, save_predictions)
+from utils import (
+    _get_audio_files,
+    compute_eer_threshold,
+    load_cv_threshold,
+    load_model_cache,
+    save_cv_threshold,
+    save_model_cache,
+    save_predictions,
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -93,6 +100,7 @@ class ShallowCNN(nn.Module):
         return x.squeeze(1)
 
 
+# NOTE: Label smoothing proved to be ineficient on the provided dataset. Do not use it for final model training.
 class LabelSmoothingBCEWithLogitsLoss(nn.Module):
     """BCEWithLogitsLoss with label smoothing for binary classification."""
 
@@ -332,7 +340,9 @@ def cross_validate(
         fold_acc = accuracy_score(y_val, fold_predictions)
 
         # Save fold model to cache
-        save_model_cache(model.state_dict(), "cnn", "model", cv_strategy, n_splits, fold=fold)
+        save_model_cache(
+            model.state_dict(), "cnn", "model", cv_strategy, n_splits, fold=fold
+        )
 
         results.append(
             {
@@ -402,15 +412,6 @@ def train_final_model(features, labels, epochs=100, spec_augment=None):
     save_model_cache(model.state_dict(), "cnn", "model")
 
     return model, trainer
-
-
-def _get_audio_files(directory):
-    """Get all WAV files in directory with their filenames."""
-    directory = Path(directory)
-    files = sorted(directory.glob("*.wav"))
-    paths = [str(f) for f in files]
-    fnames = [f.stem for f in files]
-    return paths, fnames
 
 
 def predict_on_dev(model, trainer, base_dir=None, cv_strategy="kfold", n_splits=2):
@@ -591,7 +592,7 @@ def predict_on_eval_cv(
     """
     base_dir = PROJECT_ROOT / "dataset"
 
-    print(f"\nEvaluating on eval set with CNN (CV Ensemble)...")
+    print("\nEvaluating on eval set with CNN (CV Ensemble)...")
 
     # Load CV models from cache
     cv_models = []

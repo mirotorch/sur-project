@@ -1,5 +1,5 @@
 """
-Audio preprocessing for SUR project 2025/2026.
+Audio preprocessing.
 Extracts MFCC features with deltas for CNN-based audio recognition.
 """
 
@@ -11,6 +11,8 @@ import soundfile as sf
 import torch
 import torchaudio
 import torchaudio.transforms as T
+
+from ..utils import _get_audio_files
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 
@@ -244,15 +246,6 @@ def load_audio_dataset(base_dir=None, use_augmented=True, fixed_time_steps=300):
     features = extractor.extract_batch(all_paths)
 
     return features, np.array(all_labels), all_filenames
-
-
-def _get_audio_files(directory):
-    """Get all WAV files in directory with their filenames."""
-    directory = Path(directory)
-    files = sorted(directory.glob("*.wav"))
-    paths = [str(f) for f in files]
-    fnames = [f.stem for f in files]
-    return paths, fnames
 
 
 if __name__ == "__main__":

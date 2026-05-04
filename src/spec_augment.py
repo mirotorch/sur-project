@@ -6,6 +6,7 @@ Applies frequency masking and time masking.
 import torch
 
 
+# NOTE: SpecAugment proved to be ineficient on the dataset provided. Do not use it for final model training.
 class SpecAugment:
     """SpecAugment: frequency masking + time masking on MFCC features."""
 

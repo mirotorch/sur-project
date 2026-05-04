@@ -1,6 +1,5 @@
 """
 Histogram of Oriented Gradients (HOG) feature extractor.
-Manual implementation using numpy only.
 """
 
 import numpy as np

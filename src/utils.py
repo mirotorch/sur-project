@@ -1,13 +1,12 @@
 """
-
 Utility functions for SUR project 2025/2026.
-Data loading, session parsing, and prediction utilities.
+Data loading, session parsing, caching, and prediction utilities.
 """
 
 import os
-import joblib
 from pathlib import Path
 
+import joblib
 import numpy as np
 from PIL import Image
 from sklearn.metrics import roc_curve
@@ -51,7 +50,9 @@ def load_cv_threshold(method, cv_strategy, n_splits, n_components=None):
     return None
 
 
-def get_model_cache_path(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+def get_model_cache_path(
+    method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None
+):
     """Generate cache file path for models."""
     n_comp_str = f"pca{n_components}" if n_components is not None else "nopca"
     if cv_strategy and n_splits:
@@ -64,17 +65,31 @@ def get_model_cache_path(method, model_type, cv_strategy=None, n_splits=None, n_
     return os.path.join(CACHE_DIR, filename)
 
 
-def save_model_cache(model, method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+def save_model_cache(
+    model,
+    method,
+    model_type,
+    cv_strategy=None,
+    n_splits=None,
+    n_components=None,
+    fold=None,
+):
     """Save model to cache."""
     ensure_cache_dir()
-    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
+    cache_path = get_model_cache_path(
+        method, model_type, cv_strategy, n_splits, n_components, fold
+    )
     joblib.dump(model, cache_path)
     print(f"  Saved {model_type} to {cache_path}")
 
 
-def load_model_cache(method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None):
+def load_model_cache(
+    method, model_type, cv_strategy=None, n_splits=None, n_components=None, fold=None
+):
     """Load model from cache."""
-    cache_path = get_model_cache_path(method, model_type, cv_strategy, n_splits, n_components, fold)
+    cache_path = get_model_cache_path(
+        method, model_type, cv_strategy, n_splits, n_components, fold
+    )
     if os.path.exists(cache_path):
         model = joblib.load(cache_path)
         print(f"  Loaded {model_type} from {cache_path}")
