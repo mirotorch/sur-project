@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
@@ -21,9 +20,15 @@ from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from extractors.mfcc_extractor import load_audio_dataset
 from session_cv import k_fold, loso
-from utils import (compute_dataset_hash, compute_eer_threshold, load_cv_threshold,
-                   load_model_cache, save_cv_threshold, save_model_cache,
-                   save_predictions)
+from utils import (
+    compute_dataset_hash,
+    compute_eer_threshold,
+    load_cv_threshold,
+    load_model_cache,
+    save_cv_threshold,
+    save_model_cache,
+    save_predictions,
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 CACHE_DIR = PROJECT_ROOT / "cache"
@@ -259,6 +264,7 @@ def prepare_data(base_dir, method="hog", n_components=None, use_cache=True):
 
     # Load image data
     from utils import load_dataset
+
     images, _, img_filenames = load_dataset(base_dir, use_augmented=True)
     print(f"Images: {len(images)} samples")
 
@@ -398,7 +404,15 @@ def cross_validate(
         fold_thresholds.append(fold_threshold)
 
         # Save fold model to cache
-        save_model_cache(model.state_dict(), "fusion", "model", cv_strategy, n_splits, n_components, fold)
+        save_model_cache(
+            model.state_dict(),
+            "fusion",
+            "model",
+            cv_strategy,
+            n_splits,
+            n_components,
+            fold,
+        )
 
         results.append(
             {
@@ -472,7 +486,9 @@ def train_final_model(
     return model, trainer
 
 
-def prepare_eval_data(base_dir, method="hog", n_components=None, scaler=None, pca=None, use_cache=True):
+def prepare_eval_data(
+    base_dir, method="hog", n_components=None, scaler=None, pca=None, use_cache=True
+):
     """Prepare eval data for fusion prediction."""
     print("Loading eval dataset...")
 
@@ -480,12 +496,17 @@ def prepare_eval_data(base_dir, method="hog", n_components=None, scaler=None, pc
 
     # Load eval audio
     eval_audio_dir = base_dir / "eval"
-    audio_features, _, eval_filenames = load_audio_dataset(str(eval_audio_dir), use_augmented=False)
+    audio_features, _, eval_filenames = load_audio_dataset(
+        str(eval_audio_dir), use_augmented=False
+    )
     print(f"Eval Audio: {len(audio_features)} samples")
 
     # Load eval images
     from utils import load_dataset
-    eval_images, _, img_filenames = load_dataset(str(eval_audio_dir), use_augmented=False)
+
+    eval_images, _, img_filenames = load_dataset(
+        str(eval_audio_dir), use_augmented=False
+    )
     print(f"Eval Images: {len(eval_images)} samples")
 
     # Extract image features
@@ -540,7 +561,15 @@ def prepare_eval_data(base_dir, method="hog", n_components=None, scaler=None, pc
     }
 
 
-def predict_on_dev(model, trainer, base_dir=None, method="hog", n_components=None, cv_strategy="kfold", n_splits=2):
+def predict_on_dev(
+    model,
+    trainer,
+    base_dir=None,
+    method="hog",
+    n_components=None,
+    cv_strategy="kfold",
+    n_splits=2,
+):
     """Generate predictions on dev set using CV threshold."""
     if base_dir is None:
         base_dir = PROJECT_ROOT / "dataset"
@@ -549,7 +578,9 @@ def predict_on_dev(model, trainer, base_dir=None, method="hog", n_components=Non
 
     data = prepare_data(base_dir, method, n_components, use_cache=True)
 
-    dataset = FusionDataset(data["audio_features"], data["image_features"], data["labels"])
+    dataset = FusionDataset(
+        data["audio_features"], data["image_features"], data["labels"]
+    )
     use_cuda = torch.cuda.is_available()
     loader = DataLoader(
         dataset,
@@ -588,7 +619,9 @@ def predict_on_dev(model, trainer, base_dir=None, method="hog", n_components=Non
     output_dir = PROJECT_ROOT / "results"
     output_dir.mkdir(exist_ok=True)
     output_file = output_dir / "fusion.txt"
-    save_predictions(str(output_file), data["filenames"], scores, threshold=optimal_threshold)
+    save_predictions(
+        str(output_file), data["filenames"], scores, threshold=optimal_threshold
+    )
 
     return {
         "filenames": data["filenames"],
@@ -601,7 +634,17 @@ def predict_on_dev(model, trainer, base_dir=None, method="hog", n_components=Non
     }
 
 
-def predict_on_eval(model, trainer, base_dir=None, method="hog", n_components=None, scaler=None, pca=None, cv_strategy="kfold", n_splits=2):
+def predict_on_eval(
+    model,
+    trainer,
+    base_dir=None,
+    method="hog",
+    n_components=None,
+    scaler=None,
+    pca=None,
+    cv_strategy="kfold",
+    n_splits=2,
+):
     """Evaluate on eval set using dev-trained model and CV threshold."""
     if base_dir is None:
         base_dir = PROJECT_ROOT / "dataset"
@@ -620,10 +663,14 @@ def predict_on_eval(model, trainer, base_dir=None, method="hog", n_components=No
         print(f"  Using threshold from {threshold_source}: {optimal_threshold:.4f}")
 
     # Load eval data
-    eval_data = prepare_eval_data(base_dir, method, n_components, scaler, pca, use_cache=True)
+    eval_data = prepare_eval_data(
+        base_dir, method, n_components, scaler, pca, use_cache=True
+    )
 
     eval_dataset = FusionDataset(
-        eval_data["audio_features"], eval_data["image_features"], [0] * len(eval_data["filenames"])
+        eval_data["audio_features"],
+        eval_data["image_features"],
+        [0] * len(eval_data["filenames"]),
     )
     use_cuda = torch.cuda.is_available()
     eval_loader = DataLoader(
@@ -640,7 +687,9 @@ def predict_on_eval(model, trainer, base_dir=None, method="hog", n_components=No
     output_dir = PROJECT_ROOT / "results"
     output_dir.mkdir(exist_ok=True)
     output_file = output_dir / "fusion_eval.txt"
-    save_predictions(str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold)
+    save_predictions(
+        str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold
+    )
 
     print(f"  Eval predictions saved to {output_file}")
 
@@ -673,7 +722,9 @@ def predict_on_eval_cv(
     # Load CV models from cache
     cv_models = []
     for fold in range(n_splits if cv_strategy == "kfold" else 10):
-        model_state = load_model_cache("fusion", "model", cv_strategy, n_splits, n_components, fold)
+        model_state = load_model_cache(
+            "fusion", "model", cv_strategy, n_splits, n_components, fold
+        )
         if model_state is not None:
             audio_cnn = ShallowCNN(
                 n_channels=audio_features.shape[1],
@@ -701,10 +752,14 @@ def predict_on_eval_cv(
         optimal_threshold = 0.5
 
     # Load eval data
-    eval_data = prepare_eval_data(base_dir, method, n_components, scaler, pca, use_cache=True)
+    eval_data = prepare_eval_data(
+        base_dir, method, n_components, scaler, pca, use_cache=True
+    )
 
     eval_dataset = FusionDataset(
-        eval_data["audio_features"], eval_data["image_features"], [0] * len(eval_data["filenames"])
+        eval_data["audio_features"],
+        eval_data["image_features"],
+        [0] * len(eval_data["filenames"]),
     )
     use_cuda = torch.cuda.is_available()
     eval_loader = DataLoader(
@@ -730,7 +785,9 @@ def predict_on_eval_cv(
     output_dir.mkdir(exist_ok=True)
 
     output_file = output_dir / "fusion_eval_cv.txt"
-    save_predictions(str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold)
+    save_predictions(
+        str(output_file), eval_data["filenames"], scores, threshold=optimal_threshold
+    )
 
     print(f"  Eval-CV predictions saved to {output_file}")
 
@@ -784,8 +841,13 @@ def main(
         )
 
         dev_results = predict_on_dev(
-            model, trainer, base_dir, method=method, n_components=n_components,
-            cv_strategy=cv_strategy, n_splits=n_splits
+            model,
+            trainer,
+            base_dir,
+            method=method,
+            n_components=n_components,
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
         )
 
         print("\n" + "=" * 50)
@@ -821,14 +883,25 @@ def main(
             )
 
         dev_results = predict_on_dev(
-            model, trainer, base_dir, method=method, n_components=n_components,
-            cv_strategy=cv_strategy, n_splits=n_splits
+            model,
+            trainer,
+            base_dir,
+            method=method,
+            n_components=n_components,
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
         )
 
         eval_results = predict_on_eval(
-            model, trainer, base_dir, method=method, n_components=n_components,
-            scaler=data["scaler"], pca=data["pca"],
-            cv_strategy=cv_strategy, n_splits=n_splits
+            model,
+            trainer,
+            base_dir,
+            method=method,
+            n_components=n_components,
+            scaler=data["scaler"],
+            pca=data["pca"],
+            cv_strategy=cv_strategy,
+            n_splits=n_splits,
         )
 
         print("\n" + "=" * 50)
@@ -873,7 +946,7 @@ if __name__ == "__main__":
         "--cv-strategy",
         type=str,
         choices=["kfold", "loso"],
-        default="kfold",
+        default="loso",
         help="Cross-validation strategy",
     )
     parser.add_argument(
@@ -885,15 +958,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["train", "dev", "eval-dev", "eval-cv"],
+        choices=["train", "dev", "eval"],
         default="train",
-        help="train: cross-validation, dev: train on entire dataset, eval-dev: use dev-trained model, eval-cv: use CV ensemble",
+        help="train: cross-validation, dev: train on entire dataset, eval: use dev-trained model on eval data",
     )
     parser.add_argument(
         "--method",
         type=str,
         choices=["hog", "lbp", "combined"],
-        default="hog",
+        default="combined",
         help="Image feature extraction method",
     )
     parser.add_argument(

@@ -12,7 +12,7 @@ import torch
 import torchaudio
 import torchaudio.transforms as T
 
-from ..utils import _get_audio_files
+from utils import _get_audio_files
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 

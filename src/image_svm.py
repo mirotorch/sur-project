@@ -15,9 +15,17 @@ from sklearn.svm import LinearSVC
 from extractors.hog_extractor import extract_hog_batch
 from extractors.lbp_extractor import extract_lbp_batch
 from session_cv import k_fold, loso
-from utils import (compute_dataset_hash, compute_eer_threshold, load_cv_threshold,
-                   load_dataset, load_images, load_model_cache,
-                   save_cv_threshold, save_model_cache, save_predictions)
+from utils import (
+    compute_dataset_hash,
+    compute_eer_threshold,
+    load_cv_threshold,
+    load_dataset,
+    load_images,
+    load_model_cache,
+    save_cv_threshold,
+    save_model_cache,
+    save_predictions,
+)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 
@@ -264,9 +272,13 @@ def cross_validate(
 
         # Save fold models to cache
         save_model_cache(svm, method, "svm", cv_strategy, n_splits, n_components, fold)
-        save_model_cache(scaler, method, "scaler", cv_strategy, n_splits, n_components, fold)
+        save_model_cache(
+            scaler, method, "scaler", cv_strategy, n_splits, n_components, fold
+        )
         if pca is not None:
-            save_model_cache(pca, method, "pca", cv_strategy, n_splits, n_components, fold)
+            save_model_cache(
+                pca, method, "pca", cv_strategy, n_splits, n_components, fold
+            )
 
         results.append(
             {
@@ -399,9 +411,7 @@ def predict_on_dev(
     print(f"\nEvaluating on dev set with {method.upper()}...")
 
     dev_images, dev_filenames = load_images(str(base_dir / "target"))
-    non_target_dev, non_target_fnames = load_images(
-        str(base_dir / "non-target")
-    )
+    non_target_dev, non_target_fnames = load_images(str(base_dir / "non-target"))
 
     dev_all = np.concatenate([dev_images, non_target_dev])
     dev_fnames_all = dev_filenames + non_target_fnames
@@ -594,7 +604,9 @@ def predict_on_eval_cv(
     cv_models = []
     for fold in range(n_splits if cv_strategy == "kfold" else 10):
         svm = load_model_cache(method, "svm", cv_strategy, n_splits, n_components, fold)
-        scaler = load_model_cache(method, "scaler", cv_strategy, n_splits, n_components, fold)
+        scaler = load_model_cache(
+            method, "scaler", cv_strategy, n_splits, n_components, fold
+        )
         pca = load_model_cache(method, "pca", cv_strategy, n_splits, n_components, fold)
 
         if svm is None or scaler is None:
@@ -1013,7 +1025,7 @@ if __name__ == "__main__":
         "--cv-strategy",
         type=str,
         choices=["kfold", "loso"],
-        default="kfold",
+        default="loso",
         help="Cross-validation strategy to use (default: kfold)",
     )
     parser.add_argument(
@@ -1025,9 +1037,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["train", "dev", "eval-dev", "eval-cv"],
+        choices=["train", "dev", "eval"],
         default="train",
-        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models",
+        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval: use dev-trained model for eval",
     )
     parser.add_argument(
         "--method",
@@ -1045,8 +1057,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--C",
         type=float,
-        default=1.0,
-        help="SVM regularization parameter C (default: 1.0)",
+        default=0.01,
+        help="SVM regularization parameter C (default: 0.01)",
     )
 
     args = parser.parse_args()

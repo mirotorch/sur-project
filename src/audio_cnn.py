@@ -772,7 +772,7 @@ if __name__ == "__main__":
         "--cv-strategy",
         type=str,
         choices=["kfold", "loso"],
-        default="kfold",
+        default="loso",
         help="Cross-validation strategy to use (default: kfold)",
     )
     parser.add_argument(
@@ -784,9 +784,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--mode",
         type=str,
-        choices=["train", "dev", "eval-dev", "eval-cv"],
+        choices=["train", "dev", "eval"],
         default="train",
-        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval-dev: use dev-trained model for eval, eval-cv: use ensemble of CV-trained models",
+        help="train: cross-validation with model caching, dev: train on all dev data with model caching and evaluate on dev, eval: use dev-trained model for eval",
     )
     parser.add_argument(
         "--spec-aug",

@@ -296,3 +296,14 @@ def save_predictions(filename, filenames, scores, threshold=0.5):
             f.write(f"{fname} {score:.6f} {decision}\n")
 
     print(f"Saved predictions to {filename}")
+
+
+def _get_audio_files(directory):
+    """Get all WAV files in directory with their filenames."""
+    from pathlib import Path
+
+    directory = Path(directory)
+    files = sorted(directory.glob("*.wav"))
+    paths = [str(f) for f in files]
+    fnames = [f.stem for f in files]
+    return paths, fnames
